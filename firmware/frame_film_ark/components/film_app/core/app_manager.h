@@ -90,11 +90,22 @@ app_switch_mode_t app_manager_get_switch_mode(void);
 int app_manager_is_registered(app_id_t id);
 
 /**
- * @brief 向首个 app 投递一次 APP_EVT_BOOT
+ * @brief 标记"本次上电的首个 app 还没启动"
  *
- * 由 app_init 在恢复上次 app 后调用，驱动“开机自动”行为（自动切图 / 自动拉取）。
+ * 开机画面路径与直启路径都要在切到首个 app **之前**调用它；标记后由
+ * app_do_switch() 在启动首个 app 时补投一次 APP_EVT_BOOT，驱动“开机自动”
+ * 行为（自动切图 / 自动拉取）。两条路径共用同一处投递，时序才一致。
  */
-void app_manager_notify_boot(void);
+void app_manager_boot_mark(void);
+
+/**
+ * @brief 本次启动是否还会补投 APP_EVT_BOOT
+ *
+ * 给首个 app 在 on_enter 里判"首帧要不要现在画"：若随后还有 APP_EVT_BOOT
+ * 会推进并重画（自动切图），此刻先画一遍会在 EPD 上连刷两屏。
+ * 该值在整个启动切换期间为真，切换完成后由 app_do_switch() 清零。
+ */
+int app_manager_boot_advance_pending(void);
 
 /**
  * @brief 展示开机画面（上电流程专用）

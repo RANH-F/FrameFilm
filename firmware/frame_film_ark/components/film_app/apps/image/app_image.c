@@ -194,10 +194,30 @@ static const char *app_image_enter_block_reason(void)
     return NULL;
 }
 
+/**
+ * @brief "开机自动切图"是否生效
+ *
+ * on_enter（决定首帧要不要现在画）与 APP_EVT_BOOT 两处判据必须完全一致，
+ * 否则会出现"谁都不画"或"连刷两屏"，故集中在这里。
+ */
+static bool image_boot_advance_effective(void)
+{
+    return m_image.play_mode == APP_IMAGE_PLAY_AUTO && g_service_param.sleep.sleep_mode == 1;
+}
+
 static void app_image_on_enter(void)
 {
     sys_logi(APP_IMAGE_TAG, "enter image app, count=%u id=%u",
              (unsigned)service_file_get_count(), (unsigned)m_image.file_id);
+
+    /* 本次启动还会补投 APP_EVT_BOOT，而它生效时会推进到下一张并重画：
+       首帧就交给那条路径画，否则同一张（或相邻两张）会在 EPD 上连刷两屏，
+       每屏约 1s，看着像"第一张刷新了两次"（见 app_manager_boot_advance_pending） */
+    if(app_manager_boot_advance_pending() && image_boot_advance_effective())
+    {
+        sys_logi(APP_IMAGE_TAG, "boot auto switch pending, defer first draw");
+        return;
+    }
 
     /* m_image 已由 app_state_load() 载入；image_show 内部处理越界回落 */
     image_show(m_image.file_id);
@@ -234,8 +254,7 @@ static void app_image_on_event(const app_event_t *e)
     /* 开机自动：仅启动后投递一次（用户手动切回图片 app 不会触发） */
     if(e->type == APP_EVT_BOOT)
     {
-        if(m_image.play_mode == APP_IMAGE_PLAY_AUTO &&
-           g_service_param.sleep.sleep_mode == 1)   // 休眠开启 → 开机自动切换
+        if(image_boot_advance_effective())
         {
             sys_logi(APP_IMAGE_TAG, "boot auto switch");
             image_show_next();

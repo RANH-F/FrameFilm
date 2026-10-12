@@ -66,7 +66,8 @@
 #define PROFILE_A_APP_ID                  0
 #define PROFILE_B_APP_ID                  1
 
-#define GATTS_CHAR_VAL_LEN_MAX            200
+/* 长度上限的唯一来源在 service_ble_gatts.h（列表帧等拼包处要按它设上限） */
+#define GATTS_CHAR_VAL_LEN_MAX             BLE_GATTS_CHAR_VAL_LEN_MAX
 #define CHAR_DECLARATION_SIZE             (sizeof(uint8_t))
 
 

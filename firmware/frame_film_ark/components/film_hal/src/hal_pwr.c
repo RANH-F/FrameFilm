@@ -122,6 +122,33 @@ void hal_pwr_init(void)
     // }
 }
 
+bool hal_pwr_wakeup_prepare(void)
+{
+    esp_err_t ret = esp_sleep_enable_ext0_wakeup(WAKEUP_GPIO_NUM, WAKEUP_GPIO_LEVEL);
+    if (ret != ESP_OK)
+    {
+        sys_loge(PWR_TAG, "Failed to enable GPIO wakeup: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    if (m_timer_wakeup_us > 0)
+    {
+        ret = esp_sleep_enable_timer_wakeup(m_timer_wakeup_us);
+        if (ret != ESP_OK)
+        {
+            /* 定时唤醒配不上不该拦着入睡：只是少了一次自动唤醒 */
+            sys_loge(PWR_TAG, "Failed to enable timer wakeup: %s", esp_err_to_name(ret));
+        }
+        else
+        {
+            sys_logi(PWR_TAG, "Configured timer wakeup: %llu us", m_timer_wakeup_us);
+        }
+    }
+
+    sys_logi(PWR_TAG, "Configured wakeup source: GPIO %d, level %d", WAKEUP_GPIO_NUM, WAKEUP_GPIO_LEVEL);
+    return true;
+}
+
 void hal_pwr_enter_sleep(void)
 {
     sys_logi(PWR_TAG, "Entering deep sleep");
@@ -137,28 +164,6 @@ void hal_pwr_enter_sleep(void)
     };
     gpio_config(&io_conf);
     
-    esp_err_t ret = esp_sleep_enable_ext0_wakeup(WAKEUP_GPIO_NUM, WAKEUP_GPIO_LEVEL);
-    if (ret != ESP_OK)
-    {
-        sys_loge(PWR_TAG, "Failed to enable GPIO wakeup: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    if (m_timer_wakeup_us > 0)
-    {
-        ret = esp_sleep_enable_timer_wakeup(m_timer_wakeup_us);
-        if (ret != ESP_OK)
-        {
-            sys_loge(PWR_TAG, "Failed to enable timer wakeup: %s", esp_err_to_name(ret));
-        }
-        else
-        {
-            sys_logi(PWR_TAG, "Configured timer wakeup: %llu us", m_timer_wakeup_us);
-        }
-    }
-
-    sys_logi(PWR_TAG, "Configured wakeup source: GPIO %d, level %d", WAKEUP_GPIO_NUM, WAKEUP_GPIO_LEVEL);
-
     // GPIO5 是 ext0 唤醒输入；隔离并 hold 它会使按键无法唤醒。
 
     esp_deep_sleep_start();

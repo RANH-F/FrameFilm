@@ -484,26 +484,24 @@ static void ble_task_handle(void *pvParameters)
                 vPortFree(msg.pdata);
                 break;
             }
-            if( msg.len )
+            /* 最小帧 = HEAD+CH+LEN+SUM，不足连 ch/len 都解不出来 */
+            if(msg.len >= BLE_CMD_LEN_MIN && msg.pdata[0] == BLE_CMD_HEAD)
             {
-                if(msg.pdata[0] ==  BLE_CMD_HEAD)
+                uint8_t sum = ble_checksum(msg.pdata, msg.len - 1);
+                // sys_logi(BEL_SERVICE_TAG, "sum:0x%02x", sum);
+
+                if(sum == msg.pdata[msg.len - 1])
                 {
-                    uint8_t sum = ble_checksum(msg.pdata, msg.len - 1);
-                    // sys_logi(BEL_SERVICE_TAG, "sum:0x%02x", sum);
+                    ble_cmd_t cmd = {0};
 
-                    if(sum == msg.pdata[msg.len - 1])
+                    cmd.ch = msg.pdata[1];
+                    cmd.len = msg.pdata[2];
+                    if(cmd.len == msg.len - 4)
                     {
-                        ble_cmd_t cmd = {0};
-
-                        cmd.ch = msg.pdata[1];
-                        cmd.len = msg.pdata[2];
-                        if(cmd.len == msg.len - 4)
+                        cmd.pdata = msg.pdata + 3;
+                        if(cmd.pdata)
                         {
-                            cmd.pdata = msg.pdata + 3;
-                            if(cmd.pdata)
-                            {
-                                ble_cmd_process(&cmd);
-                            }
+                            ble_cmd_process(&cmd);
                         }
                     }
                 }
@@ -951,12 +949,16 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             uint32_t file_count = service_file_get_count();
             sys_logi(BEL_SERVICE_TAG, "File list count: %d", file_count);
 
-            uint8_t *cmd_buf = pvPortMalloc(150);
+            /* 单帧 = HEAD + CH + LEN + ID + NAME_LEN + NAME + NUL + SUM = 6 + name_len，
+               其中 name_len = strlen(name) + 1。缓冲按下发通知的长度上限分配，
+               并逐条校验帧长：文件名最长 255 字节，早先用固定 150B 缓冲且不校验长度，
+               超长名会越界写堆。 */
+            uint8_t *cmd_buf = pvPortMalloc(BLE_GATTS_CHAR_VAL_LEN_MAX);
             if(cmd_buf == NULL) break;
 
             for(uint32_t i = 0; i < file_count; i++)
             {
-                memset(cmd_buf, 0, 150);
+                memset(cmd_buf, 0, BLE_GATTS_CHAR_VAL_LEN_MAX);
 
                 char filename[256];
                 if(service_file_get_filename_safe(i, filename, sizeof(filename)) != 0)
@@ -964,20 +966,29 @@ static void ble_cmd_process(ble_cmd_t *cmd)
                     sys_logw(BEL_SERVICE_TAG, "File list changed during query, abort at index: %d", i);
                     break;
                 }
-                uint8_t name_len = strlen(filename) + 1;
+                size_t name_len = strlen(filename) + 1;
+
+                /* 帧长或 LEN 字段放不下就跳过该条：GATT 层会直接丢弃超长通知，
+                   发出去也只会是坏帧 */
+                if(name_len + 6 > BLE_GATTS_CHAR_VAL_LEN_MAX || name_len > 253)
+                {
+                    sys_logw(BEL_SERVICE_TAG, "File name too long, skip id=%u name_len=%u",
+                             (unsigned)i, (unsigned)name_len);
+                    continue;
+                }
 
                 cmd_buf[0] = BLE_CMD_HEAD;
                 cmd_buf[1] = BLE_FILM_TRANS_CH_FILE_LIST;
-                cmd_buf[2] = 2 + name_len;
+                cmd_buf[2] = (uint8_t)(2 + name_len);
                 cmd_buf[3] = i & 0xff;
-                cmd_buf[4] = name_len;
+                cmd_buf[4] = (uint8_t)name_len;
 
                 memcpy(&cmd_buf[5], filename, name_len);
 
-                uint8_t checksum = ble_checksum(cmd_buf, 5 + name_len);
+                uint8_t checksum = ble_checksum(cmd_buf, (int)(5 + name_len));
                 cmd_buf[5 + name_len] = checksum;
 
-                service_ble_send_notify_data(BLE_NOTIFY_SEND_CH1, cmd_buf, 6 + name_len);
+                service_ble_send_notify_data(BLE_NOTIFY_SEND_CH1, cmd_buf, (uint16_t)(6 + name_len));
 
                 vTaskDelay(50 / portTICK_PERIOD_MS);
             }
@@ -1180,7 +1191,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         {
             sys_logi(BEL_SERVICE_TAG, "SD card format requested");
             int ret = hal_sd_format();
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_SDRESET;
             resp_buf[2] = 1;
@@ -1218,7 +1229,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CTRL_WIFI_ENABLE_GET : // WiFi开关查询
         {
             sys_logi(BEL_SERVICE_TAG, "WiFi enable: %s", g_service_param.network.wifi_enable ? "ON" : "OFF");
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_WIFI_ENABLE_GET;
             resp_buf[2] = 1;
@@ -1339,7 +1350,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         {
             uint8_t status = service_wifi_get_connect_status();
             sys_logi(BEL_SERVICE_TAG, "WiFi connect status: %s", status ? "Connected" : "Disconnected");
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_WIFI_CONNECT_GET;
             resp_buf[2] = 1;
@@ -1365,7 +1376,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             wifi_download_state_t state = service_wifi_download_get_state();
             uint8_t progress = service_wifi_download_get_progress();
             sys_logi(BEL_SERVICE_TAG, "Download state: %d, progress: %d%%", state, progress);
-            uint8_t resp_buf[7];
+            uint8_t resp_buf[6];   /* HEAD+CH+LEN+DATA(2B)+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_FILM_DOWNLOAD_STATE;
             resp_buf[2] = 2;

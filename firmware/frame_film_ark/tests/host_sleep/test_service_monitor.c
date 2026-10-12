@@ -17,6 +17,8 @@ static bool app_ready;
 static bool ble_file_closed;
 static int app_prepare_count;
 static int ble_prepare_count;
+static bool wakeup_prepare_ok;
+static int wakeup_prepare_count;
 
 static bool prepare_app(void)
 {
@@ -36,6 +38,8 @@ static void reset_case(void)
     peripheral_deinit_count = sleep_count = timer_wakeup_count = 0;
     app_ready = ble_file_closed = false;
     app_prepare_count = ble_prepare_count = 0;
+    wakeup_prepare_ok = true;
+    wakeup_prepare_count = 0;
     service_monitor_set_sleep_prepare_cb(prepare_app);
 }
 
@@ -116,12 +120,38 @@ static void test_auto_sleep_requires_both_barriers(void)
     assert(sleep_count == 1);
 }
 
+static void test_sleep_defers_when_wakeup_source_unavailable(void)
+{
+    reset_case();
+    g_service_param.sleep.sleep_mode = 0;
+    g_service_param.sleep.sleep_auto = 1;
+    g_service_param.sleep.sleep_time = 10;
+    app_ready = true;
+    ble_file_closed = true;
+    wakeup_prepare_ok = false;   /* ext0 配置失败：本次不许入睡 */
+
+    monitor_manual_sleep_event();
+    assert(service_monitor_sleep_pending());
+    assert(wakeup_prepare_count == 1);
+    /* 关键：唤醒源没配好，一步都别拆（否则会卡在"外设已卸却睡不着"） */
+    assert(app_prepare_count == 0);
+    assert(ble_prepare_count == 0);
+    assert_no_teardown();
+
+    wakeup_prepare_ok = true;    /* 恢复后由心跳重试走完正常路径 */
+    monitor_auto_sleep_manage_event();
+    assert(app_prepare_count == 1);
+    assert(ble_prepare_count == 1);
+    assert(sleep_count == 1);
+}
+
 int main(void)
 {
     test_disabled_auto_sleep();
     test_manual_sleep_waits_for_transfer_and_release();
     test_auto_sleep_requires_both_barriers();
-    puts("host_sleep: 3 tests passed");
+    test_sleep_defers_when_wakeup_source_unavailable();
+    puts("host_sleep: 4 tests passed");
     return 0;
 }
 
@@ -158,6 +188,7 @@ void hal_sd_deinit(void) { ++peripheral_deinit_count; }
 void hal_epd_deinit(void) { ++peripheral_deinit_count; }
 void hal_input_deinit(void) { ++peripheral_deinit_count; }
 void hal_pwr_enter_sleep(void) { ++sleep_count; }
+bool hal_pwr_wakeup_prepare(void) { ++wakeup_prepare_count; return wakeup_prepare_ok; }
 bool service_ble_gatts_get_connect(void) { return false; }
 void service_ble_gatt_server_uninit(void) { ++peripheral_deinit_count; }
 bool service_ble_prepare_sleep(void) { ++ble_prepare_count; return ble_file_closed; }

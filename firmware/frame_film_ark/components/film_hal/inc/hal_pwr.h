@@ -58,11 +58,23 @@ extern "C" {
 extern void hal_pwr_init(void);
 
 /**
+ * @brief 配好本次入睡的唤醒源（ext0 按键 + 可选的定时器）
+ *
+ * **必须在卸载外设之前调用**：hal_pwr_enter_sleep() 里 ext0 配置失败会直接返回，
+ * 那时若定时器已停、外设已 deinit，设备就卡在"卸了却睡不着"的状态。
+ *
+ * @return true 配置成功（可以放心往下卸外设）；false 配置失败（本次不要入睡）
+ */
+extern bool hal_pwr_wakeup_prepare(void);
+
+/**
  * @brief 进入深度睡眠模式
  * 
  * 该函数使设备进入深度睡眠模式以节省电量。
  * 在深度睡眠模式下，大部分外设将被关闭，仅保留RTC和唤醒源。
  * 设备可通过配置的唤醒源（如按键）唤醒。
+ *
+ * 唤醒源由 hal_pwr_wakeup_prepare() 提前配好，本函数只切断外设供电并开始睡眠。
  */
 extern void hal_pwr_enter_sleep(void);
 

@@ -439,6 +439,14 @@ static void monitor_enter_low_power(void)
     {
         return;
     }
+    /* 唤醒源必须先配好：hal_pwr_enter_sleep() 在 ext0 配置失败时会直接返回，
+       而下面几步（停定时器 / deinit 外设）都不可逆 —— 先卸后睡不下去就成了
+       "外设全卸、心跳也停了"的僵尸态。配不上就保持 pending，等下次心跳重试。 */
+    if(!hal_pwr_wakeup_prepare())
+    {
+        sys_logw(MONITOR_TAG, "sleep deferred: wakeup source not ready");
+        return;
+    }
     if(m_sleep_prepare_cb == NULL || !m_sleep_prepare_cb())
     {
         sys_logw(MONITOR_TAG, "sleep deferred: app/UI not stopped");

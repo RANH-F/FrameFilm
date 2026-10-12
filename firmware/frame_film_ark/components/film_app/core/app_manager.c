@@ -101,6 +101,8 @@ static const app_id_t m_menu_entries[APP_MENU_ENTRY_NUM] = {
 static uint8_t m_menu_sel = 0;   // 主菜单当前选中索引
 static uint8_t m_boot_page = 0;  // 开机画面占屏中（此期间不进入任何 app，按键丢弃）
 static app_id_t m_boot_next_app = APP_ID_MENU;  // 开机画面结束后切到哪（START APP 决定）
+static uint8_t m_boot_ui_shown = 0;  // 开机画面的 UI 页仍在屏上（收尾的唯一依据，见 app_do_switch）
+static uint8_t m_boot_evt_pending = 0;  // 开机画面期间欠着一次 APP_EVT_BOOT（见 app_do_switch）
 static uint8_t m_sleep_page = 0; // 休眠卡占屏中（同上；此后设备就断电了）
 static atomic_bool m_sleep_stop_sent = false;
 static atomic_bool m_sleep_stopped = false;
@@ -134,6 +136,7 @@ static void app_input_dispatch(input_press_type_t key);
 static input_press_type_t ble_key_to_press(uint8_t key);
 static int app_state_save_of(const app_entry_t *app);
 static int app_state_load_of(const app_entry_t *app);
+static void app_manager_notify_boot(void);
 
 /*********************************************************************
  * LOCAL HELPERS
@@ -676,6 +679,16 @@ static void app_do_switch(app_id_t id)
 
     /* ② 先停旧层：UI 层会同步关掉输出闸门并删页面，
        避免切换途中 ui_task 把 UI 帧推上屏、覆盖正要绘制的 DIRECT 画面 */
+    /* 开机页是 APP_ID_MAX 的托管页、不在 app 注册表里：app_stop_current() 按
+       m_current_app 分流根本碰不到它（默认还是图片，DIRECT 层）。必须在这里显式收掉，
+       否则 ui_page_teardown() 不会跑 —— 黑白快刷会话（hal_epd_mono_session_end）不关、
+       输出闸门与显存一直占着，紧接着直绘的图片会以错误的刷新方式叠在开机帧上
+       （表现为"图片没刷新"）。放在预检之后：切换被拦下时开机页要留着继续占屏。 */
+    if(m_boot_ui_shown)
+    {
+        m_boot_ui_shown = 0;
+        ui_core_page_exit();
+    }
     app_stop_current();
     /* 切出兜底保存（幂等，覆盖 app 内部未显式保存的改动）。
        仅在旧 app 确实运行过时保存：启动首次切换时它尚未 on_enter/载入状态，
@@ -694,6 +707,15 @@ static void app_do_switch(app_id_t id)
     app_state_load();   // ③ 切入先载入状态，再启动（按显示层分流）
     app_start_current();
     service_param_app_current_set((uint8_t)id);   // ④ 记录当前 app，供下次启动恢复
+
+    /* 走过开机画面的启动路径欠着一次 APP_EVT_BOOT：此刻目标 app 才真正成为
+       "首个 app"，在这里补投（不补的话图片自动切图 / 模板自动拉取永远不会触发）。
+       直启路径由 app_init 在切换后自行投递，那边不受影响。 */
+    if(m_boot_evt_pending)
+    {
+        m_boot_evt_pending = 0;
+        app_manager_notify_boot();
+    }
 }
 
 /**
@@ -998,7 +1020,17 @@ int app_manager_is_registered(app_id_t id)
     return app_is_registered(id);
 }
 
-void app_manager_notify_boot(void)
+void app_manager_boot_mark(void)
+{
+    m_boot_evt_pending = 1;
+}
+
+int app_manager_boot_advance_pending(void)
+{
+    return m_boot_evt_pending ? 1 : 0;
+}
+
+static void app_manager_notify_boot(void)
 {
     if(m_app_queue_hdl == NULL)
     {
@@ -1022,9 +1054,13 @@ void app_manager_boot_show(const app_ui_ops_t *ops, app_id_t next)
 
     /* 开机画面结束后去哪个 app 由调用方定（见 app_boot_cfg 的 START APP） */
     m_boot_next_app = next;
+    /* 开机画面期间没有任何 app 在运行，APP_EVT_BOOT 无处可送：
+       欠着它，等真正切到目标 app 时在 app_do_switch() 末尾补投 */
+    app_manager_boot_mark();
     /* 页面 id 用 APP_ID_MAX：开机画面不是 app，不在注册表里也不参与切换 */
     ui_core_page_enter((uint8_t)APP_ID_MAX, ops);
     m_boot_page = 1;
+    m_boot_ui_shown = 1;
 }
 
 void app_manager_boot_end(void)
@@ -1035,6 +1071,9 @@ void app_manager_boot_end(void)
     }
 
     m_boot_page = 0;
+    /* 开机页的 UI 收尾不在这里做：要等 app_do_switch() 过了进入预检、确实要切走时
+       才拆（否则切换被 enter_block_reason 拦下时，开机页已被拆、又没有新页面顶上，
+       屏上会永远停在开机帧）。见 app_do_switch() 里的 m_boot_ui_shown 分支。 */
     app_manager_switch(m_boot_next_app);
 }
 
