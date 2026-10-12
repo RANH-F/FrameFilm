@@ -69,7 +69,7 @@ typedef struct
 } ServiceNetwork_Def_t;
 
 /* 蓝牙名后缀缓冲（不含 "FRAMEFILMARK-" 前缀）：1..16 字节 UTF-8 + NUL（缓冲 17B）。
-   前缀 13B + 后缀 16B = 29B，与 service_ble_name.h 的 BLE_DEVICE_NAME_MAX_BYTES 对齐。 */
+   前缀 13B + 后缀 16B = 29B，与 service_ble.h 的 BLE_DEVICE_NAME_MAX_BYTES 对齐。 */
 #define SERVICE_BLE_NAME_SUFFIX_MAX                                (16)
 
 typedef struct

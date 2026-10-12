@@ -52,7 +52,6 @@
 #include "sys_event.h"
 #include "service_ble_gatts.h"
 #include "service_ble.h"
-#include "service_ble_name.h"
 
 /*********************************************************************
  * MACROS
@@ -898,8 +897,8 @@ void service_ble_gatt_server_init(void)
     ble_gatts_connect = BLE_GATTS_DISCONNECT;
     ble_gatts_notify_mask = 0x00;
 
-    service_ble_name_init();
-    strcpy(m_active_name, service_ble_name_get());
+    service_ble_device_name_init();
+    strcpy(m_active_name, service_ble_device_name_get());
 
     esp_read_mac((uint8_t *)sys_ble_mac, ESP_MAC_BT);
     sys_logi(GATTS_TAG, "ble mac:%02x %02x %02x %02x %02x %02x", sys_ble_mac[0], sys_ble_mac[1],   
@@ -1067,8 +1066,8 @@ void service_ble_gatt_server_reinit(void)
     ble_gatts_connect = BLE_GATTS_DISCONNECT;
     ble_gatts_notify_mask = 0x00;
 
-    service_ble_name_init();
-    strcpy(m_active_name, service_ble_name_get());
+    service_ble_device_name_init();
+    strcpy(m_active_name, service_ble_device_name_get());
 
     //gatts 初始化
     p_ret = 0;
