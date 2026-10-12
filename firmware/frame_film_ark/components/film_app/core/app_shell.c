@@ -31,6 +31,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#ifdef ARK_UI_SIMULATOR
+#include <stdlib.h>
+#else
+#include "esp_random.h"
+#endif
 
 #include "sys_log.h"
 #include "hal_bat.h"
@@ -40,6 +45,9 @@
 
 #include "ui_core.h"
 #include "app_shell.h"
+#include "app_language.h"
+#include "ui_fonts.h"
+#include "ui_boot_logo.h"
 #include "app_manager.h"
 
 /*********************************************************************
@@ -130,6 +138,15 @@ static lv_obj_t *shell_label(lv_obj_t *parent, lv_color_t color, const char *txt
     lv_obj_set_style_text_font(l, &lv_font_unscii_8, LV_PART_MAIN);
     lv_obj_set_style_text_color(l, color, LV_PART_MAIN);
     lv_label_set_text(l, txt);
+    /* 中文页面使用子集字体；保留原有英文页的小字与几何布局。 */
+    for(const unsigned char *p = (const unsigned char *)txt; *p; p++)
+    {
+        if(*p >= 0x80)
+        {
+            lv_obj_set_style_text_font(l, &ui_font_14, LV_PART_MAIN);
+            break;
+        }
+    }
     return l;
 }
 
@@ -175,7 +192,7 @@ static void shell_ind_set(lv_obj_t *label, lv_obj_t *pip, uint8_t on, uint8_t co
 {
     if(label != NULL)
     {
-        /* 用 HIDDEN 而不是透明：隐藏的 flex 子项不占位，关闭时右侧直接收成 "BAT 82%" */
+        /* 用 HIDDEN 而不是透明：隐藏的 flex 子项不占位，关闭时右侧直接收成电量百分比 */
         lv_obj_set_hidden(label, on ? false : true);
     }
     if(pip == NULL)
@@ -211,7 +228,7 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
         memset(out, 0, sizeof(*out));
     }
 
-    /* ============ 顶部状态栏：品牌 + 电量 / WiFi / 蓝牙 ============ */
+    /* ============ 顶部状态栏：品牌 + WiFi / 蓝牙 / 电量 ============ */
     status = lv_obj_create(root);
     lv_obj_remove_style_all(status);
     lv_obj_set_scrollable(status, false);
@@ -235,7 +252,7 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
         lv_obj_set_style_bg_opa(mark, LV_OPA_COVER, LV_PART_MAIN);
     }
     {
-        lv_obj_t *brand = shell_label(status, lv_color_black(), "ENDFIELD");
+        lv_obj_t *brand = shell_label(status, lv_color_black(), "RHODES ISLAND");
 
         lv_obj_set_style_text_letter_space(brand, 1, LV_PART_MAIN);
     }
@@ -253,8 +270,7 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
         shell_time_update(out);
     }
     {
-        lv_obj_t *bat = shell_label(status, lv_color_black(), "BAT --%");
-        lv_obj_t *bat_pip = shell_pip(status);
+        lv_obj_t *bat;
         lv_obj_t *wifi_label;
         lv_obj_t *wifi_pip;
         lv_obj_t *bt_label;
@@ -264,11 +280,11 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
         wifi_pip = shell_pip(status);
         bt_label = shell_label(status, lv_color_black(), "BT");
         bt_pip = shell_pip(status);
+        bat = shell_label(status, lv_color_black(), "--%");
 
         if(out != NULL)
         {
             out->bat_label = bat;
-            out->bat_pip = bat_pip;
             out->wifi_label = wifi_label;
             out->wifi_pip = wifi_pip;
             out->bt_label = bt_label;
@@ -288,14 +304,84 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
     lv_obj_set_style_border_color(foot, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_flex_flow(foot, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(foot, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    shell_label(foot, lv_color_black(), (hint != NULL) ? hint : "");
+    lv_obj_t *hint_label = shell_label(foot, lv_color_black(), (hint != NULL) ? hint : "");
     shell_spacer(foot);
-    shell_label(foot, lv_color_black(), (page != NULL) ? page : "");
+    lv_obj_t *page_label = shell_label(foot, lv_color_black(), (page != NULL) ? page : "");
+    if(out != NULL)
+    {
+        out->hint_label = hint_label;
+        out->page_label = page_label;
+    }
+}
+
+void app_shell_set_text(app_shell_t *s, const char *hint, const char *page)
+{
+    if(s == NULL) return;
+    if(s->hint_label != NULL) lv_label_set_text(s->hint_label, hint);
+    if(s->page_label != NULL) lv_label_set_text(s->page_label, page);
 }
 
 void app_shell_request_status(void)
 {
     (void)app_manager_post_ui_msg(APP_UI_REQ_STATUS_SYNC, NULL, 0);
+}
+
+lv_obj_t *app_shell_brandmark(lv_obj_t *parent)
+{
+    static const char *const quotes_zh[] = {
+        "博士，你还在和你的小动物一起玩吗？",
+        "这里万籁俱寂……太安静了，别留下我。",
+        "深陷长梦的混沌之时，你会想起----",
+        "关闭PRTS，然后闭上眼睛。等你醒来，我会履行我们的约定。",
+        "你没有忘记我",
+    };
+    /* English game loading-screen text, source recorded in boot-logo.md.
+       The first Chinese quote has no verified English counterpart yet. */
+    static const char *const quotes_en[] = {
+        "All is quiet here... too quiet. Don't leave me here.",
+        "In the void of the long dream, you will remember—",
+        "Close PRTS and close your eyes. I will fulfill our promise when you wake up.",
+        "You did not forget me.",
+    };
+    const uint8_t english = app_language_get() == APP_LANGUAGE_EN;
+    const unsigned count = english ? 4u : 5u;
+    const char *const *quotes = english ? quotes_en : quotes_zh;
+    /* One draw per creation: 4/40 or 5/50 buckets, both 10% overall.
+       Timer updates never reroll it. Preview overrides do not enter firmware. */
+#ifdef ARK_UI_SIMULATOR
+    static unsigned preview_seeded;
+    if(!preview_seeded) { srand((unsigned)time(NULL)); preview_seeded = 1; }
+    unsigned pick = (unsigned)rand() % (10u * count);
+#else
+    unsigned pick = esp_random() % (10u * count);
+#endif
+    const char *quote = pick < count ? quotes[pick] : NULL;
+#ifdef ARK_UI_SIMULATOR
+    const char *forced = getenv("ARK_BOOT_EGG");
+    if(forced && forced[0] >= '0' && forced[0] <= '5' && forced[1] == '\0')
+    {
+        /* Preview IDs match Chinese entries; English ID 1 is unavailable. */
+        unsigned id = (unsigned)(forced[0] - '0');
+        quote = id == 0 || (english && id == 1) ? NULL : quotes[id - (english ? 2u : 1u)];
+    }
+#endif
+    lv_obj_t *mark = lv_obj_create(parent);
+    lv_obj_remove_style_all(mark);
+    lv_obj_set_scrollable(mark, false);
+    lv_obj_set_size(mark, 440, APP_SHELL_BRAND_H);
+    lv_obj_t *logo = lv_image_create(mark);
+    lv_image_set_src(logo, &ui_boot_logo);
+    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 0);
+    if(quote != NULL)
+    {
+        lv_obj_t *word = shell_label(mark, lv_color_black(), quote);
+        lv_obj_set_style_text_font(word, &ui_font_14, 0);
+        lv_obj_set_width(word, 440);
+        lv_obj_set_style_text_align(word, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(word, LV_LABEL_LONG_WRAP);
+        lv_obj_align(word, LV_ALIGN_TOP_MID, 0, 268);
+    }
+    return mark;
 }
 
 void app_shell_start_tick(app_shell_t *s, app_shell_tick_cb_t cb)
@@ -348,12 +434,7 @@ void app_shell_apply(app_shell_t *s, const app_status_t *st)
 
     if(s->bat_label != NULL)
     {
-        lv_label_set_text_fmt(s->bat_label, "BAT %u%%", (unsigned)st->bat_pct);
-    }
-    /* 电量块只有"实心/留空"两态（低电量留空），不参与隐藏逻辑 */
-    if(s->bat_pip != NULL)
-    {
-        lv_obj_set_style_bg_opa(s->bat_pip, (st->bat_pct > 20) ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_label_set_text_fmt(s->bat_label, "%u%%", (unsigned)st->bat_pct);
     }
     shell_ind_set(s->wifi_label, s->wifi_pip, st->wifi_on, st->wifi_conn);
     shell_ind_set(s->bt_label, s->bt_pip, st->bt_on, st->bt_conn);

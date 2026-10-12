@@ -1,11 +1,22 @@
 # FrameFilm BLE 通信协议详细规范
 
+## 目录
+
+- [1. 概述](#1-概述)
+- [2. 协议框架](#2-协议框架)
+- [3. 通道定义](#3-通道定义)
+- [4. 命令详解](#4-命令详解)
+- Ark 扩展：[临时 WiFi 直传](#411-ark-临时-wifi-直传)、[通行证资料](#412-ark-通行证资料读取0x53)、[设备名称](#413-ark-设备名称0x54--0x55)、[WiFi OTA](#414-ark-wifi-ota0x560x58)
+- [5. 校验和计算](#5-校验和计算)
+- [6. C 语言示例](#6-c-语言示例)
+- [7. 版本历史](#7-版本历史)
+
 ## 1. 概述
 
 本文档定义 FrameFilm 设备与上位机之间的 BLE（蓝牙低功耗）通信协议。协议采用 GATT 方式进行数据传输，支持 FILM 文件传输、OTA 固件升级、设备控制、WiFi 网络配置等功能。
 
 > **同源说明**：两套冰箱贴固件 —— `firmware/frame_film/`（三机型）与 `firmware/frame_film_ark/`（通行证版，单机型）—— 的 BLE 协议**完全同源**：命令值、数据格式与回包结构一致。
-> app 框架与 UI 层（`film_app` + `film_ui`）**只存在于 `frame_film_ark`**；app 通道（`0x45~0x4E`，App 控制 / App 参数 / 时间同步 / 远程按键）也只有 `frame_film_ark` 实现，`frame_film`（三机型）是经典固件、会直接忽略这些命令。
+> app 框架与 UI 层（`film_app` + `film_ui`）**只存在于 `frame_film_ark`**；app 通道（`0x45~0x4E`，App 控制 / App 参数 / 时间同步 / 远程按键）及通行证资料读取 `0x53` 只有 `frame_film_ark` 实现，`frame_film`（三机型）是经典固件、会直接忽略这些命令。
 > 底座固件 `firmware/frame_film_dock/` 在其基础上另有专属通道（见 §3.8 键盘键值），差异以各节标注为准。
 
 ## 2. 协议框架
@@ -141,7 +152,7 @@
 | 0x03 | 动图 animation |
 | 0x04 | 系统设置 settings（UI 层） |
 | 0x05 | 主菜单 menu（UI 层，调度器根状态） |
-| 0x06 | 通行证 pass（UI 层占位页，功能待开发） |
+| 0x06 | 通行证 pass（SD 个人档案，UI 层显示） |
 
 ### 3.7 App 参数通道 (0x45 ~ 0x4A) `v1.7`新增
 
@@ -255,12 +266,49 @@
 - 与 APP_SWITCH（0x4B）走同一条上行事件总线（`SYS_EVT_BLE_APP_CMD`），由 app 调度器按通道号路由。
 - **方向约定（坑）**：固件把 `0x02` 映射成 `INPUT_PRESS_UP`，但 HAL 的 `UP`/`DOWN` **引脚命名与实体按键相反**（硬件"上"键接在 `BUTTON_PIN_DOWN` 上），于是设备实体键方向正常、而照协议值下发会**上下反向**。ForFilm 遥控面板因此在发送前把上/下对调（见 `bluetooth.js` 的 `onRemoteKeyPress`），保证与实体键行为一致。
 
+### 3.11 Ark 临时 WiFi 直传通道 (0x50 ~ 0x52)
+
+仅 `frame_film_ark` 与 Android 直传客户端使用，经典固件和 Dock 不支持。
+
+| 通道 | 命令 | 请求 DATA | 同通道响应 DATA |
+|------|------|-----------|----------------|
+| 0x50 | DIRECT_START | `SSID\0PASSWORD\0URL\0` | 1B：0 接受 / 1 忙 / 2 参数错误 / 3 资源不足 |
+| 0x51 | DIRECT_STATUS | 空 | 11B：state、progress、error、received(u32 BE)、total(u32 BE) |
+| 0x52 | DIRECT_CANCEL | 空 | 1B：0 已接受取消请求（幂等） |
+
+### 3.12 Ark 通行证资料读取 (0x53)
+
+仅 `frame_film_ark` 实现，读取固定的 `/sdcard/app/pass/profile.json`；经典固件和 Dock 不支持。
+
+| 通道 | 命令 | 请求 DATA | 同通道响应 DATA |
+|------|------|-----------|----------------|
+| 0x53 | PROFILE_READ | offset(u32 BE) + count(u8，1–128) | status(1) + offset(u32 BE) + total(u32 BE) + bytes(0–128) |
+
+### 3.13 Ark 设备名称（0x54 / 0x55，固件 3.2.5 起）
+
+| 通道 | 命令 | 请求 DATA | 同通道响应 DATA |
+|------|------|-----------|----------------|
+| 0x54 | DEVICE_NAME_GET | 空 | status(1) + 已配置完整名称 UTF-8 + NUL |
+| 0x55 | DEVICE_NAME_SET | 名称后缀 UTF-8 + NUL | status(1) + 已配置完整名称 UTF-8 + NUL |
+
+仅 Ark 实现；详情见 §4.13。
+
+### 3.14 Ark WiFi OTA 通道（0x56~0x58）
+
+仅 `frame_film_ark` 支持，完整状态和提交语义见 [§4.14](#414-ark-wifi-ota0x560x58)。
+
+| 通道 | 名称 | 请求 | 响应 |
+|---|---|---|---|
+| 0x56 | BUILD_INFO_GET | 空 | 能力版本、OTA容量、实际ELF SHA256、version、project |
+| 0x57 | DIRECT_OTA_START | size(u32 BE) + 文件SHA256(32B) + SSID\0PASSWORD\0URL\0 | 0接受 / 1忙 / 2参数 / 3资源 |
+| 0x58 | DIRECT_OTA_APPLY | 空 | 0已激活 / 1非READY / 2激活失败 |
+
 ## 4. 命令详解
 
 ### 4.1 通用规则
 
 1. **校验和计算**：`SUM = HEAD + CH + LEN + 所有 DATA 字节`（只取低 8 位）
-2. **字符串格式**：文本使用 ASCII 编码，以 `\0` 结尾
+2. **字符串格式**：除命令另有规定外，文本使用 ASCII 编码，以 `\0` 结尾；设备名称 0x54/0x55 使用 UTF-8，通行证 JSON 的编码由文件内容定义。
 3. **整数格式**：多字节整数采用 Big-Endian（大端序）编码
 4. **响应延迟**：列表查询时每条响应间隔 10ms，避免阻塞
 
@@ -432,6 +480,15 @@ DEC: 10000 bytes
 **说明**：结束 FILM 文件传输，关闭文件句柄，完成保存。`v0.3` 新增可选 flag 参数。
 默认（LEN=0）保持旧行为。批量上传场景下客户端每张携带 `0x01`，避免设备反复刷新 EPD；全部传完后由客户端显式发送 `FILE_DISPLAY (0x07)` 上屏最后一张。
 旧固件不识别该参数时会忽略多余字节，按自动加载处理，兼容安全。
+
+**Ark 文件保存与重试行为**（仅 `frame_film_ark`）：
+
+- 新的 `FILE_START` 会撤销本 BLE 链路未完成的旧上传；中途断线后可以重连，从 `FILE_START` 重传完整文件，不支持断点续传。
+- `FILE_LEN` 建立保存会话，`FILE_DATA` 按实际写入结果累计长度；`FILE_STOP` 仅在接收长度、写入长度和声明长度一致且文件关闭、提交成功后完成保存。
+- 上传先写临时文件，同名替换保留一份旧文件用于恢复。失败的上传不进入播放列表，也不发布 `SYS_EVT_FILE_SAVED`。显式路径上传保持不刷新列表、不发布该事件的原有语义。
+- `.film` 提交前核对文件头、720×480 尺寸、编码格式、帧数及主体长度；显式路径的非 `.film` 资源不套用图片格式校验。按帧数分流到另一目录时，保留来源目录的同名旧文件，并以静默保存事件通知，避免误显示旧内容。
+- BLE 与 WiFi 共用一个保存任务；另一来源正在保存时，新保存请求失败，调用方需在空闲后重试。
+- 命令号、请求格式和静默保存 flag 不变，本次未增加文件命令的应用层 ACK。GATT 写入成功仅表示传输层接收，**不代表 SD 保存成功或屏幕已经显示**；现有客户端可能仍按发送进度提示完成，实际结果需结合设备日志和文件列表确认。
 
 ---
 
@@ -1337,6 +1394,70 @@ SUM  = (0x55 + 0x4E + 0x01 + 0x02) & 0xFF = 0xA6
 
 ---
 
+### 4.11 Ark 临时 WiFi 直传
+
+手机创建 2.4GHz Wi-Fi Direct GO，并在其 IPv4 地址上提供临时 HTTP 文件服务。Ark 作为普通 WiFi STA 加入，BLE 负责会话控制与状态查询，文件内容通过 WiFi 下载；不要求路由器，不与小米互传私有协议互通。
+
+`DIRECT_START` 的三个字段为 ASCII，各自以 NUL 结尾，不带版本字节或额外尾部数据。SSID 为 1–32 字节，密码最多 63 字节，URL 使用 `http://`，URL 的文件名应为有效且唯一的 `.film` 名称。DATA 总长不得超过 **192 字节**。当前固件的 GATT 特征最大长度为 200，客户端请求 ATT MTU 200，并检查整帧 `DATA长度+4 <= MTU-3`；不足时应报错，不能截断发送。
+
+开始前应排除其他 BLE 文件、OTA、WiFi 下载会话。接受开始仅表示任务已建立。直传期间固件拒绝冲突的文件写入、删除、OTA、重置、重启、格式化、网络配置与下载命令，并返回同通道 1B `1`（忙）；通行证资料读取返回自己的状态码 `3`（忙），其他只读查询仍可用。自动休眠在会话中暂缓，手动休眠先请求取消，等待清理后再入睡。BLE 断开也会请求取消。
+
+`DIRECT_STATUS` 固定返回 11 字节，多字节值为**大端**，不可直接复制 C 结构体：
+
+| 偏移 | 长度 | 含义 |
+|------|------|------|
+| 0 | 1 | state：0 IDLE / 1 CONNECTING / 2 DOWNLOADING / 3 RESTORING / 4 DONE / 5 ERROR / 6 CANCELLED |
+| 1 | 1 | progress：0–100，下载百分比；100 不等于会话结束 |
+| 2 | 1 | error：0 无 / 1 连接 / 2 HTTP / 3 保存 / 4 取消 / 5 恢复 / 6 资源 |
+| 3 | 4 | received：已交给文件保存流程的字节数 |
+| 7 | 4 | total：HTTP Content-Length，尚未获得时为 0 |
+
+临时网络凭据只存 RAM，不修改已保存的 WiFi 开关、SSID、密码和 API 地址。文件复用现有 SD 保存事务：中断撤销未提交文件，完成后提交并通知图片播放。成功提交之后仍有 RESTORING 阶段，用于恢复之前的 WiFi 配置和连接状态；恢复失败为 ERROR/error=5。只有 DONE 才表示本次保存及网络恢复成功。终态保留到下一次开始，客户端可约每 800 ms 查询一次。
+
+`DIRECT_CANCEL` 的确认包仅表示已请求取消。客户端应继续查询至 DONE/ERROR/CANCELLED，之后关闭手机 HTTP 服务并释放 GO。已完成提交的文件不因迟到的取消而删除。连接与恢复各最多等待 25 s，HTTP 单次操作超时 5 s、下载循环总限时 120 s；既有 SD 文件任务若卡死，同步保存接口仍可能等待，不能把这些网络超时当作整个会话的绝对上限。
+
+### 4.12 Ark 通行证资料读取（0x53）
+
+请求 `DATA=[offset(4B，大端), count(1B)]`，`count` 必须为 1–128。设备每次只读取固定路径 `/sdcard/app/pass/profile.json`，请求结束即关闭文件；文件最大 350000 字节。资料可以通过现有 FILE_START/FILE_NAME/FILE_LEN/FILE_DATA/FILE_STOP 上传，FILE_NAME 固定用 `app/pass/profile.json`。显式路径上传不会自动刷新页面，回到通行证页或单击确认键刷新。
+
+响应 `DATA=[status(1B), offset(4B，大端), total(4B，大端), bytes(0–128B)]`，`LEN=9+实际读取字节数`。`offset` 回显请求位置，`total` 是已成功取得的文件长度；状态码：
+
+| status | 含义 |
+|--------|------|
+| 0 | 成功；`offset==total` 时为 EOF，bytes 为空 |
+| 1 | 未配置（文件不存在） |
+| 2 | 读取失败（含文件超过 350000B） |
+| 3 | 忙（BLE 文件/OTA 上传或临时 WiFi 直传进行中） |
+| 4 | 参数错误（请求长度、count 或 offset 不合法） |
+
+`offset` 可等于 `total`；大于 `total` 返回状态 4。错误响应没有 bytes；文件尚未打开时 `total=0`。读取整份资料时按响应中的实际 bytes 长度推进 offset，直至 `offset==total`。单帧最大 `137B DATA + 4B 帧头尾 = 141B`，客户端需协商 ATT MTU 至少 144；推荐沿用现有 200 MTU。设备入睡门闸期间同其他普通命令一样不应答。
+
+### 4.13 Ark 设备名称（0x54 / 0x55）
+
+完整蓝牙名称为 `FRAMEFILMARK-<后缀>`，固定前缀用于机型识别。默认后缀是完整蓝牙 MAC 的 12 位大写十六进制字符（不含冒号），使不同设备具有不同默认名称。用户可以修改后缀，但自定义同名不会被全局查重；客户端仍按蓝牙设备地址/标识区分实体设备。
+
+`DEVICE_NAME_SET` 只传后缀，长度为 **1–16 个 UTF-8 字节**，另加一个 NUL；不是 16 个汉字。固件拒绝非法 UTF-8、控制字符、嵌入 NUL、空后缀和超长输入。完整名称最长 29 字节；scan response 仅含完整名称 AD，连同 AD 头最多 31 字节。广播包保留服务 UUID 和设备 MAC，客户端使用 `FRAMEFILMARK` 名称前缀扫描，兼容旧的无后缀名称。
+
+响应状态 `0` 表示成功，后跟以 NUL 结尾的完整名称；`1` 表示参数无效，`2` 表示 NVS 保存失败，错误响应仅含状态字节。GET 请求必须为空。最大响应 DATA 为 31 字节，完整帧 35 字节，ATT MTU 至少 38，建议保持 200。
+
+名称后缀存于独立 NVS key `ble_name`，不改变原有参数 blob 布局，也不修改 SD 通行证资料。SET 成功即表示已提交 NVS；当前连接不重启或断开。新广播名与 GATT Device Name（0x2A00）在下次蓝牙初始化时生效，客户端提示重启设备即可。GET 返回**已保存配置**，可能与本次连接缓存的旧广播名不同。设备入睡门闸期间不应答；旧固件不支持命令时，客户端应超时提示升级，不能把 GATT 写成功当作保存成功。
+
+### 4.14 Ark WiFi OTA（0x56~0x58）
+
+仅 Ark 支持；保留 film 0x50/0x51/0x52 与旧 BLE OTA 0x10~0x13。BLE 控制、手机 WiFi Direct GO HTTP 提供原始 app `.bin`、设备流式拉取到 inactive OTA partition，不需要 SD。当前未启用 boot rollback，不承诺启动失败后自动回滚。
+
+| CH | 请求 DATA | 响应 DATA |
+|---|---|---|
+| 0x56 BUILD_INFO_GET | 空 | capVersion=1(u8), otaMax(u32 BE), 当前 app ELF SHA256(32B), version(NUL ASCII), project(NUL ASCII) |
+| 0x57 DIRECT_OTA_START | size(u32 BE), 文件SHA256(32B), SSID\0PASSWORD\0URL\0 | 0接受 / 1忙 / 2参数或容量无效 / 3资源不足 |
+| 0x58 DIRECT_OTA_APPLY | 空 | 0已激活待重启 / 1非READY或已取消 / 2激活失败 |
+
+0x57 DATA 总长仍须 ≤192B，三字符串约束与0x50一致；OTA大小必须非零且不超过0x56的otaMax。只接受项目名 `frame_film_ark`、ESP32-S3的app镜像，不支持merged flash镜像。HTTP必须200且Content-Length等于请求size；逐块写入并验证完整文件SHA256，ESP-IDF镜像检查通过后才能准备提交。version（含3.2.5彩蛋）仅供展示，不作为升级限制或成功标识；同项目、同S3且合法的镜像可升级。
+
+0x51仍返回11B（state,progress,error,received:u32 BE,total:u32 BE）。原0~6不变，新增7=READY、8=APPLYING。READY表示完整镜像已校验、原WiFi已恢复、启动分区尚未改变；该状态仍独占会话，120秒未apply/cancel自动清理。APPLYING表示正在激活/待重启。百分比100仅表示数据接收完成。新增error：7=OTA写入/镜像/目标检查失败，8=HTTP声明长度或SHA256不符，9=READY等待超时；0~6沿用原定义。
+
+0x52共用取消；下载或READY取消均abort暂存并保持旧boot partition，清理后可以从头重试，无断点续传。apply提交点之后取消不能撤销启动分区。0x58返回0后设备延迟约1.5秒重启，为BLE应答留出发送时间；App应释放HTTP服务/GO，重连同一设备后读0x56并核对导入镜像的实际ELF SHA256，匹配才表示升级成功，不能只比较version或把断连/100%当成功。超时应显示“结果待确认”，允许重连确认。
+
 ## 5. 校验和计算
 
 校验和采用 **简单求和法**（Sum Check），计算公式：
@@ -1497,6 +1618,10 @@ int parse_response(uint8_t* in_buf, int in_len, uint8_t* out_ch, uint8_t* out_da
 
 | 版本 | 日期 | 描述 |
 |------|------|------|
+| 1.14 | 2026-10-08 | Ark WiFi OTA 0x56~0x58：实际ELF SHA构建身份、inactive Flash流式校验、READY/apply、取消与超时；未启用boot rollback |
+| 1.13 | 2026-10-07 | Ark 3.2.5 设备名称读取/保存 0x54/0x55：UTF-8 后缀、独立 NVS、重启后广播生效 |
+| 1.12 | 2026-10-07 | Ark 通行证固定资料读取 0x53：分块读取 SD 上的 profile.json，不改变既有上传或其他固件命令 |
+| 1.11 | 2026-10-07 | 新增 Ark 临时 WiFi 直传 0x50–0x52：RAM 网络会话、下载进度、取消与恢复；Android GO 提供临时 HTTP 文件服务 |
 | 1.10 | 2026-09-22 | 新增 §3.10 / §4.10 远程按键注入通道 (0x4E，仅通行证版 `frame_film_ark`)：1B 键值（确认/长按/上/下/双击），设备映射为 HAL 同构输入事件并回显该字节；app_id 表补 `0x06 通行证 pass`（`FULL` 模式注册项 6 → 7） |
 | 1.9 | 2026-09-20 | 新增 §3.9 时间同步通道 (0x4D)：4B 大端 Unix 秒（UTC）+ 2B 大端时区（距 UTC 分钟数，东为正），设备回显同样 6 字节；配套固件新增 `service_time` 模块，时区随 `tz_min` 落盘（`SERVICE_PARAM_VER` 升至 3），时间不落盘 |
 | 1.8 | 2026-09-17 | App 控制通道 APP_SWITCH / APP_CURRENT_GET 调整为 **0x4B / 0x4C**（0x43 / 0x44 归 Dock 底座键盘键值通道，避免撞号）；新增 §3.8 / §4.9 记录 Dock 键盘键值通道 (0x43 / 0x44，仅 Dock) |

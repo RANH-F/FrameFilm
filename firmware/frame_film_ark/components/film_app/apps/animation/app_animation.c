@@ -551,7 +551,10 @@ static void app_animation_on_event(const app_event_t *e)
         {
         case SYS_EVT_FILE_SAVED:
             // 新动图落盘：列表已刷新，重置到第一个播放
-            app_animation_on_downloaded();
+            if(e->len == 0 || e->payload[0] != 0)
+            {
+                app_animation_on_downloaded();
+            }
             break;
         case SYS_EVT_FILM_FRAME_DONE:
             /* 上一帧刚落屏：不等到下一个 100ms 心跳，立刻接上下一帧 */

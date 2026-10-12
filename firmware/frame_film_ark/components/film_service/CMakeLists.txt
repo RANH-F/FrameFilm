@@ -1,6 +1,7 @@
 set(srcs "src/service_init.c"
          "src/service_ble.c"
          "src/service_ble_gatts.c"
+         "src/service_ble_name.c"
          "src/service_ota.c"
          "src/service_param.c"
          "src/service_time.c"
@@ -12,7 +13,7 @@ set(srcs "src/service_init.c"
 
 set(public_include "inc")
 
-set(requires film_hal film_sys  bt nvs_flash app_update esp_wifi esp_netif esp_http_client json)
+set(requires film_hal film_sys  bt nvs_flash app_update esp_wifi esp_netif esp_http_client json mbedtls)
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS ${public_include}

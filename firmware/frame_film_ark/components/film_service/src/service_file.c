@@ -30,6 +30,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -53,7 +54,8 @@
 #define FILE_MSG_QUEUE_ITEM_SIZE    sizeof( file_msg_t )
 
 #define SYS_OS_PRI_FILE_TASK        (6)
-#define SYS_OS_SIZE_FILE_TASK       (4096)
+/* 启动时清理上传残留最多递归 3 层，每层有路径/stat 局部变量；4KB 实机溢出。 */
+#define SYS_OS_SIZE_FILE_TASK       (8192)
 #define SYS_OS_NAME_FILE_TASK       "file_task"
 
 #define FILE_TIMER_BASE_INTERVAL_MS (1000)
@@ -62,7 +64,12 @@
 
 #define FILM_HEADER_SIZE            (32)
 
-// .film 文件头偏移：帧数（2 字节小端）
+// .film 文件头字段均为小端
+#define FILM_HDR_OFFSET_SIZE        (0x00)
+#define FILM_HDR_OFFSET_WIDTH       (0x04)
+#define FILM_HDR_OFFSET_HEIGHT      (0x06)
+#define FILM_HDR_OFFSET_COLORCOUNT  (0x08)
+#define FILM_HDR_OFFSET_FORMAT      (0x09)
 #define FILM_HDR_OFFSET_FRAMECOUNT  (0x0A)
 
 // set_dir_sync 等待列表刷新的超时上限（SD 首次挂载/大目录扫描可能较慢）
@@ -86,8 +93,12 @@ typedef struct {
     char save_filename[256]; // 当前保存的文件名
     char save_dir[64];       // 保存时的工作目录快照（避免保存途中切目录导致路径错乱）
     char save_path[512];     // 保存时的完整路径（显式路径模式下由相对路径拼接而来）
+    char save_part_path[544];
+    uint8_t save_header[FILM_HEADER_SIZE]; // First bytes observed before fwrite.
+    size_t save_header_len;
+    uint8_t save_owner;
+    uint8_t save_failed;
     uint8_t save_skip_relocate; // 1：显式路径保存，完成后跳过 relocate/列表刷新/事件上浮
-    uint8_t save_auto_load;  // 保存完成后是否自动加载显示（0：静默，1：自动加载）
 } file_service_state_t;
 
 /*********************************************************************
@@ -102,6 +113,9 @@ static QueueHandle_t m_file_msg_hdl = NULL;
 static TimerHandle_t m_file_timer = NULL;
 static file_service_state_t m_file_state;
 static SemaphoreHandle_t m_file_list_mutex = NULL;  // 保护 file_list/file_count 跨任务访问
+static SemaphoreHandle_t m_save_call_mutex = NULL;
+static SemaphoreHandle_t m_save_done = NULL;
+static int m_save_result = -1;
 static char m_file_active_dir[64];                  // 当前工作目录（/sdcard/film 或 /sdcard/animation）
 static volatile uint8_t m_list_ready = 0;           // 当前目录列表是否已刷新完成（供 set_dir_sync 等待）
 
@@ -112,6 +126,20 @@ static volatile uint8_t m_list_ready = 0;           // 当前目录列表是否�
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
+static void file_log_header(const char *stage, const uint8_t *hdr, size_t len)
+{
+    char hex[FILM_HEADER_SIZE * 2 + 1];
+    static const char digits[] = "0123456789ABCDEF";
+    for(size_t i = 0; i < len; ++i)
+    {
+        hex[i * 2] = digits[hdr[i] >> 4];
+        hex[i * 2 + 1] = digits[hdr[i] & 15];
+    }
+    hex[len * 2] = '\0';
+    sys_logd(FILE_TAG, "Film header trace stage=%s owner=%u bytes=%u hex=%s",
+             stage, (unsigned)m_file_state.save_owner, (unsigned)len, hex);
+}
+
 static void file_task_handle(void *pvParameters);
 static void file_msg_send(void *p_msg, bool in_isr);
 static void file_timer_callback(TimerHandle_t xTimer);
@@ -121,10 +149,17 @@ static void file_load_event(uint32_t file_id);
 static void file_load_next_event(void);
 static void file_sd_check_event(void);
 static void file_free_buffer(void);
+static int file_validate_film(uint16_t *frame_count);
+static int file_target_by_frame_count(char *dst_path, size_t dst_size);
 static void file_invalidate_buffer(void);
-static void file_relocate_by_frame_count(void);
-static void file_publish_list_event(void);
+static void file_publish_list_event(uint8_t save_pending);
 static int  file_mkdir_parents(const char *filepath);
+static void file_save_discard(void);
+static int file_save_commit(const char *target);
+static int file_recover_target(const char *target);
+static int file_has_suffix(const char *name, const char *suffix);
+static void file_clean_dir(const char *dir_path);
+static int file_save_call(file_msg_t *msg);
 
 /*********************************************************************
  * LOCAL HELPERS
@@ -163,7 +198,6 @@ void service_file_init(void)
     m_file_state.save_file_handle = NULL;
     m_file_state.save_file_size = 0;
     m_file_state.save_written = 0;
-    m_file_state.save_auto_load = 1;
 
     m_list_ready = 0;   // 首次列表由 SD 挂载后的刷新事件置位
 
@@ -175,6 +209,8 @@ void service_file_init(void)
     {
         m_file_list_mutex = xSemaphoreCreateMutex();
     }
+    if(m_save_call_mutex == NULL) m_save_call_mutex = xSemaphoreCreateMutex();
+    if(m_save_done == NULL) m_save_done = xSemaphoreCreateBinary();
 
     if(m_file_task_hdl == NULL)
     {
@@ -283,7 +319,7 @@ static void file_task_handle(void *pvParameters)
             {
             case MSG_FILE_LIST_REFRESH:
                 file_list_refresh_event();
-                file_publish_list_event();
+                file_publish_list_event(0);
                 break;
             case MSG_FILE_LOAD:
                 file_load_event(msg.file_id);
@@ -293,11 +329,15 @@ static void file_task_handle(void *pvParameters)
                 break;
             case MSG_SD_MOUNTED:
                 // 先刷新列表再上浮事件，避免订阅者读到旧的 count
+                file_clean_dir(FILM_DIR);
+                file_clean_dir(ANIM_DIR);
+                file_clean_dir("/sdcard/app");
                 file_list_refresh_event();
-                file_publish_list_event();
+                file_publish_list_event(0);
                 sys_event_publish(SYS_EVT_SD_MOUNT, NULL, 0);
                 break;
             case MSG_SD_UNMOUNTED:
+                file_save_discard();
                 file_free_buffer();
                 file_list_lock();
                 if(m_file_state.file_list)
@@ -312,133 +352,176 @@ static void file_task_handle(void *pvParameters)
                 break;
             case MSG_FILE_SAVE_START:
             case MSG_FILE_SAVE_START_TO:
-                if(msg.file_size >= FILM_HEADER_SIZE)
+                m_save_result = -1;
+                if(m_file_state.save_owner != 0 || !m_file_state.sd_mounted ||
+                   msg.pdata == NULL || msg.file_size == 0)
                 {
-                    if(msg.ID == MSG_FILE_SAVE_START_TO)
+                    goto save_start_done;
+                }
+                m_file_state.save_skip_relocate = (msg.ID == MSG_FILE_SAVE_START_TO);
+                if(m_file_state.save_skip_relocate)
+                {
+                    if(snprintf(m_file_state.save_path, sizeof(m_file_state.save_path),
+                                "/sdcard/%s", (char*)msg.pdata) >= sizeof(m_file_state.save_path) ||
+                       file_mkdir_parents(m_file_state.save_path) != 0) goto save_start_done;
+                    m_file_state.save_filename[0] = '\0';
+                    m_file_state.save_dir[0] = '\0';
+                }
+                else
+                {
+                    snprintf(m_file_state.save_filename, sizeof(m_file_state.save_filename), "%s", (char*)msg.pdata);
+                    snprintf(m_file_state.save_dir, sizeof(m_file_state.save_dir), "%s", m_file_active_dir);
+                    if(snprintf(m_file_state.save_path, sizeof(m_file_state.save_path), "%s/%s",
+                                m_file_state.save_dir, m_file_state.save_filename) >= sizeof(m_file_state.save_path)) goto save_start_done;
+                }
+                if(snprintf(m_file_state.save_part_path, sizeof(m_file_state.save_part_path), "%s.ffupload.part",
+                            m_file_state.save_path) >= sizeof(m_file_state.save_part_path)) goto save_start_done;
+                if(file_recover_target(m_file_state.save_path) != 0) goto save_start_done;
+                remove(m_file_state.save_part_path);
+                m_file_state.save_file_handle = fopen(m_file_state.save_part_path, "wb");
+                if(m_file_state.save_file_handle)
+                {
+                    m_file_state.save_file_size = msg.file_size;
+                    m_file_state.save_written = 0;
+                    m_file_state.save_header_len = 0;
+                    m_file_state.save_failed = 0;
+                    m_file_state.save_owner = msg.owner;
+                    m_save_result = 0;
+                }
+save_start_done:
+                if(msg.pdata)
+                {
+                    free(msg.pdata);
+                }
+                xSemaphoreGive(m_save_done);
+                break;
+            case MSG_FILE_SAVE_DATA:
+                m_save_result = -1;
+                if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle &&
+                   !m_file_state.save_failed && msg.pdata &&
+                   msg.data_len <= m_file_state.save_file_size - m_file_state.save_written)
+                {
+                    if(m_file_state.save_header_len < FILM_HEADER_SIZE &&
+                       (!m_file_state.save_skip_relocate || file_has_suffix(m_file_state.save_path, ".film")))
                     {
-                        // 显式路径模式：pdata 为相对 /sdcard 的路径（如 app/image/cover.film）
-                        snprintf(m_file_state.save_path, sizeof(m_file_state.save_path), "/sdcard/%s", (char*)msg.pdata);
-                        memset(m_file_state.save_filename, 0, sizeof(m_file_state.save_filename));
-                        m_file_state.save_dir[0] = '\0';
-                        m_file_state.save_skip_relocate = 1;
-                        if(file_mkdir_parents(m_file_state.save_path) != 0)
+                        size_t take = FILM_HEADER_SIZE - m_file_state.save_header_len;
+                        if(take > msg.data_len) take = msg.data_len;
+                        memcpy(m_file_state.save_header + m_file_state.save_header_len, msg.pdata, take);
+                        m_file_state.save_header_len += take;
+                        file_log_header("prewrite", m_file_state.save_header, m_file_state.save_header_len);
+                    }
+                    size_t written = fwrite(msg.pdata, 1, msg.data_len, m_file_state.save_file_handle);
+                    m_file_state.save_written += written;
+                    if(written == msg.data_len) m_save_result = 0;
+                    else m_file_state.save_failed = 1;
+                }
+                else if(m_file_state.save_owner == msg.owner)
+                {
+                    m_file_state.save_failed = 1;
+                }
+                if(msg.pdata)
+                {
+                    free(msg.pdata);
+                }
+                xSemaphoreGive(m_save_done);
+                break;
+            case MSG_FILE_SAVE_STOP:
+                m_save_result = -1;
+                if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle)
+                {
+                    int close_result = fclose(m_file_state.save_file_handle);
+                    int close_errno = errno;
+                    m_file_state.save_file_handle = NULL;
+                    char target[sizeof(m_file_state.save_path)];
+                    snprintf(target, sizeof(target), "%s", m_file_state.save_path);
+                    int is_film = !m_file_state.save_skip_relocate ||
+                                  file_has_suffix(m_file_state.save_path, ".film");
+                    if(close_result != 0)
+                    {
+                        sys_loge(FILE_TAG, "Save close failed: %s (errno=%d)",
+                                 m_file_state.save_part_path, close_errno);
+                    }
+                    else if(m_file_state.save_failed)
+                    {
+                        sys_loge(FILE_TAG, "Save write failed: %s", m_file_state.save_part_path);
+                    }
+                    else if(m_file_state.save_written != m_file_state.save_file_size)
+                    {
+                        sys_loge(FILE_TAG, "Save size mismatch: %s (%lu/%lu)",
+                                 m_file_state.save_part_path,
+                                 (unsigned long)m_file_state.save_written,
+                                 (unsigned long)m_file_state.save_file_size);
+                    }
+                    else if(m_file_state.save_skip_relocate ?
+                            (is_film && file_validate_film(NULL) != 0) :
+                            file_target_by_frame_count(target, sizeof(target)) != 0)
+                    {
+                        sys_loge(FILE_TAG, "Save validation/target failed: %s", m_file_state.save_part_path);
+                    }
+                    else if(file_save_commit(target) != 0)
+                    {
+                        sys_loge(FILE_TAG, "Save commit failed: %s -> %s",
+                                 m_file_state.save_part_path, target);
+                    }
+                    else
+                    {
+                        m_save_result = 0;
+                        sys_logi(FILE_TAG, "File committed: %s", target);
+                        if(!m_file_state.save_skip_relocate)
                         {
-                            sys_loge(FILE_TAG, "Create parent dir failed: %s", m_file_state.save_path);
+                            file_list_refresh_event();
+                            file_publish_list_event(SYS_FILE_LIST_SAVE_PENDING);
+                            uint8_t auto_load = 0;
+                            const char *target_name = strrchr(target, '/');
+                            if(msg.file_id && target_name &&
+                               strlen(m_file_active_dir) == (size_t)(target_name - target) &&
+                               strncmp(m_file_active_dir, target, target_name - target) == 0)
+                            {
+                                uint32_t found = FILE_ID_NONE;
+                                file_list_lock();
+                                for(uint32_t i = 0; m_file_state.file_list != NULL &&
+                                    i < m_file_state.file_count; i++)
+                                {
+                                    if(strcmp(m_file_state.file_list[i].filename, m_file_state.save_filename) == 0)
+                                    {
+                                        found = i;
+                                        break;
+                                    }
+                                }
+                                file_list_unlock();
+                                if(found != FILE_ID_NONE)
+                                {
+                                    m_file_state.current_file_id = found;
+                                    auto_load = 1;
+                                }
+                            }
+                            file_invalidate_buffer();
+                            sys_event_publish(SYS_EVT_FILE_SAVED, &auto_load, sizeof(auto_load));
                         }
-                    }
-                    else
-                    {
-                        snprintf(m_file_state.save_filename, sizeof(m_file_state.save_filename), "%s", (char*)msg.pdata);
-                        // 快照当前工作目录：保存途中若 app 切换目录，路径仍以开始保存时为准
-                        strncpy(m_file_state.save_dir, m_file_active_dir, sizeof(m_file_state.save_dir) - 1);
-                        m_file_state.save_dir[sizeof(m_file_state.save_dir) - 1] = '\0';
-                        snprintf(m_file_state.save_path, sizeof(m_file_state.save_path), "%s/%s", m_file_state.save_dir, m_file_state.save_filename);
-                        m_file_state.save_skip_relocate = 0;
-                    }
-
-                    m_file_state.save_file_handle = fopen(m_file_state.save_path, "wb");
-                    if(m_file_state.save_file_handle == NULL)
-                    {
-                        sys_loge(FILE_TAG, "Open file for save failed: %s", m_file_state.save_path);
-                    }
-                    else
-                    {
-                        m_file_state.save_file_size = msg.file_size;
-                        m_file_state.save_written = 0;
-                        sys_logi(FILE_TAG, "Start save file: %s, size: %d", m_file_state.save_path, msg.file_size);
                     }
                 }
                 else
                 {
-                    sys_loge(FILE_TAG, "Invalid file size: %d, must >= %d", msg.file_size, FILM_HEADER_SIZE);
+                    sys_loge(FILE_TAG, "Save stop state mismatch: request_owner=%u save_owner=%u handle=%p",
+                             (unsigned)msg.owner, (unsigned)m_file_state.save_owner,
+                             (void *)m_file_state.save_file_handle);
                 }
-                if(msg.pdata)
-                {
-                    free(msg.pdata);
-                }
+                if(m_file_state.save_owner == msg.owner) file_save_discard();
+                xSemaphoreGive(m_save_done);
                 break;
-            case MSG_FILE_SAVE_DATA:
-                if(m_file_state.save_file_handle && msg.pdata)
+            case MSG_FILE_SAVE_ABORT:
+                m_save_result = -1;
+                if(m_file_state.save_owner == msg.owner)
                 {
-                    size_t written = fwrite(msg.pdata, 1, msg.data_len, m_file_state.save_file_handle);
-                    m_file_state.save_written += written;
-                    // sys_logi(FILE_TAG, "Written %d bytes, total: %d/%d", written, m_file_state.save_written, m_file_state.save_file_size);
+                    file_save_discard();
+                    m_save_result = 0;
                 }
-                if(msg.pdata)
+                else if(m_file_state.save_owner == 0)
                 {
-                    free(msg.pdata);
+                    /* STOP 失败可能已丢弃暂存文件；重复取消应视为已完成。 */
+                    m_save_result = 0;
                 }
-                break;
-            case MSG_FILE_SAVE_STOP:
-                if(m_file_state.save_file_handle)
-                {
-                    fclose(m_file_state.save_file_handle);
-                    m_file_state.save_file_handle = NULL;
-                    sys_logi(FILE_TAG, "Save file complete: %s, written: %d", m_file_state.save_path, m_file_state.save_written);
-                    if(m_file_state.save_written != m_file_state.save_file_size)
-                    {
-                        sys_loge(FILE_TAG, "File size mismatch: written=%d, expected=%d", m_file_state.save_written, m_file_state.save_file_size);
-                    }
-                    else if(m_file_state.save_skip_relocate)
-                    {
-                        // 显式路径（app 封面等）：不参与图片/动图列表，不刷新列表、不上浮事件
-                        sys_logi(FILE_TAG, "Explicit path save done, skip relocate/list/event");
-                    }
-                    else
-                    {
-                        sys_logi(FILE_TAG, "Refreshing file list and loading new photo...");
-                        // 按帧数分流：多帧动图归入 /sdcard/animation，单帧图片归入 /sdcard/film
-                        file_relocate_by_frame_count();
-                        // 刷新当前工作目录的文件列表
-                        file_list_refresh_event();
-                        file_publish_list_event();
-
-                        // 静默模式（批量上传）不自动加载显示，仅保存
-                        if(m_file_state.save_auto_load)
-                        {
-                            // 定位新文件在列表中的下标，交由 app 层在事件中显示（服务层不直接驱动刷屏）
-                            /* 持锁查找：set_dir() 可能在别的任务里把列表 free 掉，
-                               裸查列表同样会踩到撕裂状态（见 file_load_event 的说明） */
-                            uint32_t found = FILE_ID_NONE;
-                            char want[sizeof(m_file_state.save_filename)];
-
-                            strncpy(want, m_file_state.save_filename, sizeof(want) - 1);
-                            want[sizeof(want) - 1] = '\0';
-
-                            file_list_lock();
-                            for(uint32_t i = 0; i < m_file_state.file_count; i++)
-                            {
-                                if(strcmp(m_file_state.file_list[i].filename, want) == 0)
-                                {
-                                    found = i;
-                                    break;
-                                }
-                            }
-                            file_list_unlock();
-
-                            if(found != FILE_ID_NONE)
-                            {
-                                sys_logi(FILE_TAG, "Found new file at index %d", found);
-                                m_file_state.current_file_id = found;
-                            }
-                        }
-
-                        // 全部保存处理完成后上浮事件（刷新列表已就绪，动图重置到第一个 / 图片刷新显示）
-                        // payload: u8 auto_load，0 表示静默保存，app 层据此决定是否自动显示
-                        uint8_t auto_load = m_file_state.save_auto_load ? 1 : 0;
-
-                        /* 卡上内容已变（可能是同名覆盖）：作废 PSRAM 里那份缓冲，
-                           否则随后"显示新文件"会复用旧图（见 file_invalidate_buffer） */
-                        file_invalidate_buffer();
-
-                        sys_event_publish(SYS_EVT_FILE_SAVED, &auto_load, sizeof(auto_load));
-                    }
-                }
-                m_file_state.save_file_size = 0;
-                m_file_state.save_written = 0;
-                m_file_state.save_skip_relocate = 0;
-                memset(m_file_state.save_filename, 0, sizeof(m_file_state.save_filename));
-                memset(m_file_state.save_path, 0, sizeof(m_file_state.save_path));
+                xSemaphoreGive(m_save_done);
                 break;
             default:
                 break;
@@ -515,6 +598,8 @@ static void file_list_refresh_event(void)
         file_list_unlock();
         return;
     }
+
+    file_clean_dir(m_file_active_dir);
 
     // 释放旧的文件列表
     if(m_file_state.file_list)
@@ -666,10 +751,13 @@ static void file_list_refresh_event(void)
 /**
  * @brief 广播文件列表刷新完成事件（须在 file_list_refresh_event 之后、锁外调用）
  */
-static void file_publish_list_event(void)
+static void file_publish_list_event(uint8_t save_pending)
 {
     uint32_t count = service_file_get_count();
-    sys_event_publish(SYS_EVT_FILE_LIST, &count, sizeof(count));
+    uint8_t payload[sizeof(count) + 1];
+    memcpy(payload, &count, sizeof(count));
+    payload[sizeof(count)] = save_pending;
+    sys_event_publish(SYS_EVT_FILE_LIST, payload, save_pending ? sizeof(payload) : sizeof(count));
 }
 
 /**
@@ -734,72 +822,227 @@ static int file_mkdir_parents(const char *filepath)
  *  - FrameCount <= 1 → /sdcard/film
  * 已在目标目录时不做任何操作。
  */
-static void file_relocate_by_frame_count(void)
+static int file_validate_film(uint16_t *frame_count_out)
 {
-    char src_path[512];
-    snprintf(src_path, sizeof(src_path), "%s/%s", m_file_state.save_dir, m_file_state.save_filename);
-
-    FILE *fp = fopen(src_path, "rb");
+    FILE *fp = fopen(m_file_state.save_part_path, "rb");
     if(fp == NULL)
     {
-        sys_logw(FILE_TAG, "relocate: open %s failed", src_path);
-        return;
+        int err = errno;
+        sys_loge(FILE_TAG, "Film header open failed: %s (errno=%d)",
+                 m_file_state.save_part_path, err);
+        return -1;
     }
 
     uint8_t hdr[FILM_HEADER_SIZE];
+    errno = 0;
     size_t rd = fread(hdr, 1, sizeof(hdr), fp);
+    int read_error = ferror(fp);
+    int read_errno = errno;
+    file_log_header("readback", hdr, rd);
+    size_t compared = rd < m_file_state.save_header_len ? rd : m_file_state.save_header_len;
+    for(size_t i = 0; i < compared; ++i)
+    {
+        if(hdr[i] != m_file_state.save_header[i])
+        {
+            sys_loge(FILE_TAG, "Film header first difference owner=%u offset=%u prewrite=%02X readback=%02X",
+                     (unsigned)m_file_state.save_owner, (unsigned)i,
+                     m_file_state.save_header[i], hdr[i]);
+            break;
+        }
+    }
     fclose(fp);
 
-    if(rd < FILM_HEADER_SIZE)
+    if(rd != FILM_HEADER_SIZE || m_file_state.save_written < FILM_HEADER_SIZE)
     {
-        sys_logw(FILE_TAG, "relocate: read header failed: %s", src_path);
-        return;
+        sys_loge(FILE_TAG, "Film header read failed: %s (read=%u/%d, written=%lu, ferror=%d, errno=%d)",
+                 m_file_state.save_part_path, (unsigned)rd, FILM_HEADER_SIZE,
+                 (unsigned long)m_file_state.save_written, read_error, read_errno);
+        return -1;
     }
 
+    uint32_t body_size = m_file_state.save_written - FILM_HEADER_SIZE;
+    uint32_t header_size = (uint32_t)hdr[FILM_HDR_OFFSET_SIZE]
+                         | ((uint32_t)hdr[FILM_HDR_OFFSET_SIZE + 1] << 8)
+                         | ((uint32_t)hdr[FILM_HDR_OFFSET_SIZE + 2] << 16)
+                         | ((uint32_t)hdr[FILM_HDR_OFFSET_SIZE + 3] << 24);
+    uint16_t width = (uint16_t)hdr[FILM_HDR_OFFSET_WIDTH]
+                   | ((uint16_t)hdr[FILM_HDR_OFFSET_WIDTH + 1] << 8);
+    uint16_t height = (uint16_t)hdr[FILM_HDR_OFFSET_HEIGHT]
+                    | ((uint16_t)hdr[FILM_HDR_OFFSET_HEIGHT + 1] << 8);
     uint16_t frame_count = (uint16_t)hdr[FILM_HDR_OFFSET_FRAMECOUNT]
                          | ((uint16_t)hdr[FILM_HDR_OFFSET_FRAMECOUNT + 1] << 8);
+    if(frame_count == 0) frame_count = 1;
+
+    uint32_t frame_size;
+    switch(hdr[FILM_HDR_OFFSET_FORMAT])
+    {
+    case 0x00:
+        if(hdr[FILM_HDR_OFFSET_COLORCOUNT] < 2 || hdr[FILM_HDR_OFFSET_COLORCOUNT] > 6)
+        {
+            sys_loge(FILE_TAG, "Invalid film color count: %u (format=0)",
+                     (unsigned)hdr[FILM_HDR_OFFSET_COLORCOUNT]);
+            return -1;
+        }
+        frame_size = (EPD_WIDTH * EPD_HEIGHT) / 2;
+        break;
+    case 0x01:
+        frame_size = (EPD_WIDTH * EPD_HEIGHT) / 8;
+        break;
+    case 0x02:
+    case 0x03:
+        frame_size = EPD_WIDTH * EPD_HEIGHT;
+        break;
+    default:
+        sys_loge(FILE_TAG, "Invalid film format: %u (file=%s)",
+                 (unsigned)hdr[FILM_HDR_OFFSET_FORMAT], m_file_state.save_part_path);
+        return -1;
+    }
+    if(width != EPD_WIDTH || height != EPD_HEIGHT || header_size != body_size ||
+       body_size % frame_size != 0 || body_size / frame_size != frame_count)
+    {
+        sys_loge(FILE_TAG, "Invalid film header: %s (size=%lu/%lu, dimensions=%ux%u/%ux%u, color=%u, format=%u, frames=%u, frame_size=%lu)",
+                 m_file_state.save_part_path, (unsigned long)header_size,
+                 (unsigned long)body_size, (unsigned)width, (unsigned)height,
+                 (unsigned)EPD_WIDTH, (unsigned)EPD_HEIGHT,
+                 (unsigned)hdr[FILM_HDR_OFFSET_COLORCOUNT],
+                 (unsigned)hdr[FILM_HDR_OFFSET_FORMAT], (unsigned)frame_count,
+                 (unsigned long)frame_size);
+        return -1;
+    }
+
+    if(frame_count_out) *frame_count_out = frame_count;
+    return 0;
+}
+
+static int file_target_by_frame_count(char *dst_path, size_t dst_size)
+{
+    uint16_t frame_count;
+    if(file_validate_film(&frame_count) != 0) return -1;
 
     const char *dst_dir = (frame_count > 1) ? ANIM_DIR : FILM_DIR;
 
-    // 已在目标目录，无需移动
-    if(strcmp(m_file_state.save_dir, dst_dir) == 0)
-    {
-        return;
-    }
-
-    // 确保目标目录存在
+    if(strcmp(m_file_state.save_dir, dst_dir) == 0) return 0;
     DIR *dir = opendir(dst_dir);
-    if(dir == NULL)
+    if(dir == NULL && mkdir(dst_dir, 0777) != 0)
     {
-        if(mkdir(dst_dir, 0777) != 0)
-        {
-            sys_loge(FILE_TAG, "relocate: create %s failed", dst_dir);
-            return;
-        }
+        int err = errno;
+        sys_loge(FILE_TAG, "Save target directory failed: %s (errno=%d)", dst_dir, err);
+        return -1;
     }
-    else
+    if(dir) closedir(dir);
+    if(snprintf(dst_path, dst_size, "%s/%s", dst_dir, m_file_state.save_filename) >= dst_size)
     {
-        closedir(dir);
+        sys_loge(FILE_TAG, "Save target path too long: %s/%s", dst_dir, m_file_state.save_filename);
+        return -1;
     }
+    return 0;
+}
 
-    char dst_path[512];
-    snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, m_file_state.save_filename);
+static void file_save_discard(void)
+{
+    if(m_file_state.save_file_handle)
+    {
+        fclose(m_file_state.save_file_handle);
+        m_file_state.save_file_handle = NULL;
+    }
+    if(m_file_state.save_owner && m_file_state.save_part_path[0]) remove(m_file_state.save_part_path);
+    m_file_state.save_owner = 0;
+    m_file_state.save_failed = 0;
+    m_file_state.save_file_size = 0;
+    m_file_state.save_written = 0;
+    m_file_state.save_part_path[0] = '\0';
+}
 
-    // 目标存在同名文件时先删除（FATFS 的 rename 不覆盖已存在文件）
+/* 仅处理本保存机制的固定 .bak；提交中断时优先恢复旧正式文件。 */
+static int file_recover_target(const char *target)
+{
+    char backup[544];
+    if(snprintf(backup, sizeof(backup), "%s.ffupload.bak", target) >= sizeof(backup)) return -1;
     struct stat st;
-    if(stat(dst_path, &st) == 0)
+    if(stat(backup, &st) != 0) return 0;
+    if(stat(target, &st) == 0)
     {
-        remove(dst_path);
+        if(remove(backup) == 0) return 0;
+        int err = errno;
+        sys_loge(FILE_TAG, "Remove stale backup failed: %s (errno=%d)", backup, err);
+        return -1;
     }
+    if(rename(backup, target) == 0) return 0;
+    int err = errno;
+    sys_loge(FILE_TAG, "Restore rename failed: %s -> %s (errno=%d)", backup, target, err);
+    return -1;
+}
 
-    if(rename(src_path, dst_path) != 0)
+static int file_save_commit(const char *target)
+{
+    char backup[544];
+    if(snprintf(backup, sizeof(backup), "%s.ffupload.bak", target) >= sizeof(backup)) return -1;
+    if(file_recover_target(target) != 0) return -1;
+    struct stat st;
+    int had_old = stat(target, &st) == 0;
+    if(had_old && rename(target, backup) != 0)
     {
-        sys_loge(FILE_TAG, "relocate: %s -> %s failed", src_path, dst_path);
+        int err = errno;
+        sys_loge(FILE_TAG, "Backup rename failed: %s -> %s (errno=%d)", target, backup, err);
+        return -1;
     }
-    else
+    if(rename(m_file_state.save_part_path, target) != 0)
     {
-        sys_logi(FILE_TAG, "relocate: %s -> %s (frames=%d)", src_path, dst_path, frame_count);
+        int err = errno;
+        sys_loge(FILE_TAG, "Commit rename failed: %s -> %s (errno=%d)",
+                 m_file_state.save_part_path, target, err);
+        if(had_old && rename(backup, target) != 0)
+        {
+            int restore_err = errno;
+            sys_loge(FILE_TAG, "Restore after commit failure failed: %s -> %s (errno=%d)",
+                     backup, target, restore_err);
+        }
+        return -1;
     }
+    if(had_old) remove(backup);
+    return 0;
+}
+
+static int file_has_suffix(const char *name, const char *suffix)
+{
+    size_t n = strlen(name), s = strlen(suffix);
+    return n >= s && strcmp(name + n - s, suffix) == 0;
+}
+
+static void file_clean_tree(const char *dir_path, unsigned depth)
+{
+    DIR *dir = opendir(dir_path);
+    if(!dir) return;
+    struct dirent *entry;
+    while((entry = readdir(dir)) != NULL)
+    {
+        char path[544];
+        if(snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name) >= sizeof(path)) continue;
+        struct stat st;
+        if(stat(path, &st) != 0) continue;
+        if(depth > 0 && S_ISDIR(st.st_mode) &&
+           strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        {
+            file_clean_tree(path, depth - 1);
+            continue;
+        }
+        if(!S_ISREG(st.st_mode)) continue;
+        if(!file_has_suffix(entry->d_name, ".ffupload.part") &&
+           !file_has_suffix(entry->d_name, ".ffupload.bak")) continue;
+        if(m_file_state.save_owner && strcmp(path, m_file_state.save_part_path) == 0) continue;
+        if(file_has_suffix(path, ".ffupload.bak"))
+        {
+            path[strlen(path) - strlen(".ffupload.bak")] = '\0';
+            file_recover_target(path);
+        }
+        else remove(path);
+    }
+    closedir(dir);
+}
+
+static void file_clean_dir(const char *dir_path)
+{
+    file_clean_tree(dir_path, 2);
 }
 
 static void file_free_buffer(void)
@@ -1006,64 +1249,70 @@ void service_file_load_next(void)
     file_msg_send(&msg, 0);
 }
 
-int service_file_save_data(const char *pfilename, uint32_t file_size, uint8_t *pdata, uint32_t data_len)
+static int file_save_call(file_msg_t *msg)
 {
-    if(!m_file_state.sd_mounted)
+    if(msg->owner != FILE_SAVE_BLE && msg->owner != FILE_SAVE_WIFI)
     {
-        sys_logw(FILE_TAG, "SD card not mounted");
+        if(msg->pdata) vPortFree(msg->pdata);
         return -1;
     }
-
-    file_msg_t msg = {0};
-    msg.ID = MSG_FILE_SAVE_DATA;
-    msg.file_size = file_size;
-    msg.pdata = pdata;
-    msg.data_len = data_len;
-    file_msg_send(&msg, 0);
-    return 0;
+    if(!m_file_msg_hdl || !m_save_call_mutex || !m_save_done)
+    {
+        if(msg->pdata) vPortFree(msg->pdata);
+        return -1;
+    }
+    xSemaphoreTake(m_save_call_mutex, portMAX_DELAY);
+    if(xQueueSend(m_file_msg_hdl, msg, portMAX_DELAY) != pdPASS)
+    {
+        if(msg->pdata) vPortFree(msg->pdata);
+        xSemaphoreGive(m_save_call_mutex);
+        return -1;
+    }
+    xSemaphoreTake(m_save_done, portMAX_DELAY);
+    int result = m_save_result;
+    xSemaphoreGive(m_save_call_mutex);
+    return result;
 }
 
-int service_file_save_start(const char *pfilename, uint32_t file_size)
+int service_file_save_data(file_save_owner_t owner, uint8_t *pdata, uint32_t data_len)
 {
-    if(!m_file_state.sd_mounted)
+    if(!pdata || !data_len)
     {
-        sys_logw(FILE_TAG, "SD card not mounted");
+        if(pdata) vPortFree(pdata);
         return -1;
     }
+    file_msg_t msg = {.ID = MSG_FILE_SAVE_DATA, .owner = owner, .pdata = pdata, .data_len = data_len};
+    return file_save_call(&msg); // 入队成功后 file_task 接管 pdata，包括失败路径
+}
 
-    if(file_size < FILM_HEADER_SIZE)
-    {
-        sys_logw(FILE_TAG, "Invalid file size: %d, must >= %d", file_size, FILM_HEADER_SIZE);
-        return -1;
-    }
+int service_file_save_start(file_save_owner_t owner, const char *pfilename, uint32_t file_size)
+{
+    if(!pfilename || !pfilename[0] || strcmp(pfilename, ".") == 0 ||
+       strcmp(pfilename, "..") == 0 || strchr(pfilename, '/') || strchr(pfilename, '\\') ||
+       strlen(pfilename) >= sizeof(m_file_state.save_filename) || file_size < FILM_HEADER_SIZE) return -1;
 
     file_msg_t msg = {0};
     msg.ID = MSG_FILE_SAVE_START;
+    msg.owner = owner;
     msg.file_size = file_size;
     msg.pdata = (uint8_t*)pvPortMalloc(strlen(pfilename) + 1);
-    if(msg.pdata)
-    {
-        memcpy(msg.pdata, pfilename, strlen(pfilename) + 1);
-    }
-    file_msg_send(&msg, 0);
-    return 0;
+    if(!msg.pdata) return -1;
+    memcpy(msg.pdata, pfilename, strlen(pfilename) + 1);
+    int result = file_save_call(&msg);
+    return result;
 }
 
-int service_file_save_start_to(const char *rel_path, uint32_t file_size)
+int service_file_save_start_to(file_save_owner_t owner, const char *rel_path, uint32_t file_size)
 {
-    if(!m_file_state.sd_mounted)
-    {
-        sys_logw(FILE_TAG, "SD card not mounted");
-        return -1;
-    }
-
-    if(rel_path == NULL || rel_path[0] == '\0' || rel_path[0] == '/' || strstr(rel_path, "..") != NULL)
+    if(rel_path == NULL || rel_path[0] == '\0' || rel_path[0] == '/' ||
+       strchr(rel_path, '\\') || strstr(rel_path, "..") != NULL ||
+       strlen(rel_path) + sizeof("/sdcard/.ffupload.part") >= sizeof(m_file_state.save_part_path))
     {
         sys_logw(FILE_TAG, "Invalid explicit path: %s", rel_path ? rel_path : "(null)");
         return -1;
     }
 
-    if(file_size < FILM_HEADER_SIZE)
+    if(file_size == 0)
     {
         sys_logw(FILE_TAG, "Invalid file size: %d, must >= %d", file_size, FILM_HEADER_SIZE);
         return -1;
@@ -1071,6 +1320,7 @@ int service_file_save_start_to(const char *rel_path, uint32_t file_size)
 
     file_msg_t msg = {0};
     msg.ID = MSG_FILE_SAVE_START_TO;
+    msg.owner = owner;
     msg.file_size = file_size;
     msg.pdata = (uint8_t*)pvPortMalloc(strlen(rel_path) + 1);
     if(msg.pdata == NULL)
@@ -1078,16 +1328,20 @@ int service_file_save_start_to(const char *rel_path, uint32_t file_size)
         return -1;
     }
     memcpy(msg.pdata, rel_path, strlen(rel_path) + 1);
-    file_msg_send(&msg, 0);
-    return 0;
+    int result = file_save_call(&msg);
+    return result;
 }
 
-void service_file_save_stop(uint8_t auto_load)
+int service_file_save_stop(file_save_owner_t owner, uint8_t auto_load)
 {
-    m_file_state.save_auto_load = auto_load ? 1 : 0;
-    file_msg_t msg = {0};
-    msg.ID = MSG_FILE_SAVE_STOP;
-    file_msg_send(&msg, 0);
+    file_msg_t msg = {.ID = MSG_FILE_SAVE_STOP, .owner = owner, .file_id = auto_load ? 1 : 0};
+    return file_save_call(&msg);
+}
+
+int service_file_save_abort(file_save_owner_t owner)
+{
+    file_msg_t msg = {.ID = MSG_FILE_SAVE_ABORT, .owner = owner};
+    return file_save_call(&msg);
 }
 
 uint32_t service_file_get_count(void)

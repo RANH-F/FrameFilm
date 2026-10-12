@@ -1,6 +1,8 @@
 #ifndef __SERVICE_MONITOR_H__
 #define __SERVICE_MONITOR_H__
 
+#include <stdbool.h>
+
 
 /*********************************************************************
  * INCLUDES
@@ -67,10 +69,16 @@ extern void service_monitor_init(void);
  * 已验证过的入睡路径）。与自动休眠不同，**不看休眠模式开关** —— 用户明确按下的
  * 动作就该执行；定时唤醒参数仍按既有规则生效（sleep_auto && sleep_time > 0）。
  *
- * 调用方须自行确认唤醒条件已解除（见 hal_pwr_wake_condition_met），
- * 否则唤醒源的电平条件当场成立、设备会立刻醒回来。
+ * monitor 在卸载外设之前再次检查唤醒脚；仍按下则保留请求并等待释放，
+ * 同时等待进行中的直传取消与恢复完成，避免刚入睡就被同一次长按唤醒。
  */
 extern void service_monitor_request_sleep(void);
+/* 入睡已请求时不再接受新的临时文件传输。 */
+extern bool service_monitor_sleep_pending(void);
+
+/* app 层注册：返回 true 仅表示 app 与 UI 已同步停止输出。 */
+typedef bool (*service_monitor_sleep_prepare_cb_t)(void);
+extern void service_monitor_set_sleep_prepare_cb(service_monitor_sleep_prepare_cb_t cb);
 
 #ifdef __cplusplus
 }

@@ -30,6 +30,8 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <errno.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -37,25 +39,31 @@
 
 #include "esp_err.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 
 #include "sys_log.h"
 #include "sys_event.h"
 
 #include "service_ble_gatts.h"
 #include "service_ble.h"
+#include "service_ble_name.h"
 #include "service_file.h"
 #include "service_film.h"
 #include "service_ota.h"
 #include "service_param.h"
 #include "service_time.h"
 #include "service_wifi.h"
+#include "service_monitor.h"
 
 #include "hal_api.h"
 
 /*********************************************************************
  * MACROS
  */
-#define BLE_RESP_DATA_MAX          (60)   /* 回包数据长度上限（含 TLV），用于栈上组帧 */
+#define BLE_RESP_DATA_MAX          (137)  /* PROFILE_READ: 9B 元数据 + 最多 128B 数据 */
+#define BLE_PROFILE_PATH           "/sdcard/app/pass/profile.json"
+#define BLE_PROFILE_FILE_MAX       (350000L)
+#define BLE_PROFILE_CHUNK_MAX      (128u)
 
 
 /*********************************************************************
@@ -95,6 +103,10 @@ static uint8_t m_film_trans_state = BLE_FILM_TRANS_IDLE;
 static uint8_t m_film_trans_filename[256];
 static uint32_t m_film_trans_file_size = 0;
 static uint32_t m_film_trans_received = 0;
+static volatile uint8_t m_ble_link_epoch = 0;
+static volatile uint8_t m_ble_abort_pending = 0;
+static atomic_bool m_ble_sleep_stop_sent = false;
+static atomic_bool m_ble_sleep_done = false;
 static uint8_t m_ota_trans_state = BLE_OTA_TRANS_IDLE;
 static uint32_t m_ota_trans_file_size = 0;
 static uint32_t m_ota_trans_received = 0;
@@ -112,6 +124,57 @@ static service_ble_app_id_get_cb_t m_app_id_get_cb = NULL;
 static void ble_task_handle(void *pvParameters);
 static uint8_t ble_checksum(uint8_t arr[], int len);
 static void ble_cmd_process(ble_cmd_t *cmd);
+static int ble_file_reset(void);
+
+void service_ble_transfer_disconnected(void)
+{
+    service_wifi_direct_cancel();
+    m_ble_link_epoch++;
+    m_ble_abort_pending = 1;
+    if(m_ble_msg_hdl)
+    {
+        ble_msg_t msg = {.ID = MSG_BLE_FILE_ABORT};
+        (void)xQueueSend(m_ble_msg_hdl, &msg, 0);
+    }
+}
+
+static int ble_file_reset(void)
+{
+    if(m_film_trans_state != BLE_FILM_TRANS_IDLE && m_film_trans_state != BLE_FILM_TRANS_STOPPED)
+    {
+        /* START/NAME 尚未打开文件；LEN/DATA 才有待关闭的暂存文件。 */
+        if((m_film_trans_state == BLE_FILM_TRANS_RECV_LEN ||
+            m_film_trans_state == BLE_FILM_TRANS_RECV_DATA) &&
+           service_file_save_abort(FILE_SAVE_BLE) != 0) return -1;
+    }
+    m_film_trans_state = BLE_FILM_TRANS_IDLE;
+    m_film_trans_received = 0;
+    m_film_trans_file_size = 0;
+    m_film_trans_filename[0] = '\0';
+    return 0;
+}
+
+bool service_ble_prepare_sleep(void)
+{
+    if(m_ble_task_hdl == NULL) return true; /* BLE 从未启用，无文件写入者。 */
+    if(atomic_load(&m_ble_sleep_done)) return true;
+    if(m_ble_msg_hdl == NULL) return false;
+
+    if(!atomic_exchange(&m_ble_sleep_stop_sent, true))
+    {
+        /* 排到队首：正在执行的文件调用先完成，旧队列命令在入睡门闸下丢弃。 */
+        ble_msg_t msg = {.ID = MSG_BLE_FILE_ABORT, .subID = 1};
+        if(xQueueSendToFront(m_ble_msg_hdl, &msg, 0) != pdPASS)
+        {
+            atomic_store(&m_ble_sleep_stop_sent, false);
+            return false;
+        }
+    }
+    for(unsigned i = 0; i < 500 && atomic_load(&m_ble_sleep_stop_sent) &&
+        !atomic_load(&m_ble_sleep_done); i++)
+        vTaskDelay(pdMS_TO_TICKS(20));
+    return atomic_load(&m_ble_sleep_done);
+}
 
 /*********************************************************************
  * GLOBAL FUNCTIONS
@@ -190,6 +253,7 @@ void service_ble_apply_enable(uint8_t on)
             return;
         }
         service_ble_gatts_dev_disconnect();
+        service_ble_transfer_disconnected();
         service_ble_gatt_server_uninit();
         m_ble_up = 0;
     }
@@ -246,6 +310,7 @@ void service_ble_msg_gatts_cmd_send( uint8_t const *p_data, uint16_t len )
         ble_msg_t msg = {0};
 
         msg.ID = MSG_BLE_CH1_IN_CMD;
+        msg.subID = m_ble_link_epoch;
         msg.len = len;
         msg.pdata = pvPortMalloc(len);
         if(msg.pdata == NULL)
@@ -308,10 +373,21 @@ static void ble_task_handle(void *pvParameters)
         ble_msg_t msg;
         SYS_ERROR_CHECK( xQueueReceive( m_ble_msg_hdl, (void *const)&msg, portMAX_DELAY ) != pdPASS );
 
+        if(m_ble_abort_pending)
+        {
+            m_ble_abort_pending = 0;
+            ble_file_reset();
+        }
+
         switch(msg.ID)
         {
         case MSG_BLE_CH1_IN_CMD :
         {
+            if(msg.subID != m_ble_link_epoch)
+            {
+                vPortFree(msg.pdata);
+                break;
+            }
             if( msg.len )
             {
                 if(msg.pdata[0] ==  BLE_CMD_HEAD)
@@ -369,6 +445,13 @@ static void ble_task_handle(void *pvParameters)
         case MSG_BLE_GAP_DISCONNECT:
             service_ble_gatts_dev_disconnect();
             break;
+        case MSG_BLE_FILE_ABORT:
+            if(msg.subID == 1)
+            {
+                if(ble_file_reset() == 0) atomic_store(&m_ble_sleep_done, true);
+                else atomic_store(&m_ble_sleep_stop_sent, false);
+            }
+            break; // 普通断连在队首统一执行 m_ble_abort_pending 撤销
         default :
         {
             if( msg.len )
@@ -381,6 +464,167 @@ static void ble_task_handle(void *pvParameters)
     }
 }
 
+static bool ble_cmd_conflicts_with_direct(uint8_t ch)
+{
+    switch(ch)
+    {
+    case BLE_FILM_TRANS_CH_FILE_NAME:
+    case BLE_FILM_TRANS_CH_FILE_LEN:
+    case BLE_FILM_TRANS_CH_FILE_DATA:
+    case BLE_FILM_TRANS_CH_FILE_STOP:
+    case BLE_FILM_TRANS_CH_FILE_START:
+    case BLE_FILM_TRANS_CH_FILE_DELETE:
+    case BLE_FILM_TRANS_CH_OTA_LEN:
+    case BLE_FILM_TRANS_CH_OTA_DATA:
+    case BLE_FILM_TRANS_CH_OTA_STOP:
+    case BLE_FILM_TRANS_CH_OTA_START:
+    case BLE_FILM_TRANS_CH_DEVICE_NAME_SET:
+    case BLE_FILM_TRANS_CH_CTRL_APP_SWITCH:
+    case BLE_FILM_TRANS_CH_CTRL_KEY_INJECT:
+    case BLE_FILM_TRANS_CH_APP_IMAGE_PARAM:
+    case BLE_FILM_TRANS_CH_APP_TEMPLATE_PARAM:
+    case BLE_FILM_TRANS_CH_APP_ANIM_PARAM:
+    case BLE_FILM_TRANS_CH_CTRL_TIME_SYNC:
+    case BLE_FILM_TRANS_CH_CTRL_SLEEPONOFF:
+    case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE:
+    case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_TIME:
+    case BLE_FILM_TRANS_CH_CTRL_RESET:
+    case BLE_FILM_TRANS_CH_CTRL_REBOOT:
+    case BLE_FILM_TRANS_CH_CTRL_SDRESET:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_ENABLE:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_SSID:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_PASSWORD:
+    case BLE_FILM_TRANS_CH_CTRL_FILM_API_URL:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_CONNECT:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_DISCONNECT:
+    case BLE_FILM_TRANS_CH_CTRL_WIFI_CLEAR:
+    case BLE_FILM_TRANS_CH_CTRL_FILM_DOWNLOAD:
+    case BLE_FILM_TRANS_CH_CTRL_FILM_HEARTBEAT_URL:
+    case BLE_FILM_TRANS_CH_CTRL_FILM_HEARTBEAT_INTERVAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint8_t ble_direct_start(const ble_cmd_t *cmd)
+{
+    if(service_monitor_sleep_pending()) return 1;
+    if(cmd->len == 0 || cmd->len > BLE_DIRECT_START_DATA_MAX) return 2;
+    if((m_film_trans_state > BLE_FILM_TRANS_IDLE && m_film_trans_state < BLE_FILM_TRANS_STOPPED) ||
+       (m_ota_trans_state > BLE_OTA_TRANS_IDLE && m_ota_trans_state < BLE_OTA_TRANS_STOPPED)) return 1;
+
+    bool ota = cmd->ch == BLE_FILM_TRANS_CH_DIRECT_OTA_START;
+    if(ota && cmd->len <= 36) return 2;
+    uint32_t size = ota ? ((uint32_t)cmd->pdata[0] << 24) | ((uint32_t)cmd->pdata[1] << 16) |
+                         ((uint32_t)cmd->pdata[2] << 8) | cmd->pdata[3] : 0;
+    const uint8_t *cursor = cmd->pdata + (ota ? 36 : 0);
+    size_t remaining = cmd->len - (ota ? 36 : 0);
+    const char *fields[3];
+    for(size_t i = 0; i < 3; i++)
+    {
+        const uint8_t *end = memchr(cursor, '\0', remaining);
+        if(end == NULL) return 2;
+        fields[i] = (const char *)cursor;
+        size_t consumed = (size_t)(end - cursor) + 1;
+        cursor += consumed;
+        remaining -= consumed;
+    }
+    if(remaining != 0) return 2;
+    return ota ? service_wifi_direct_ota_start(fields[0], fields[1], fields[2], size, &cmd->pdata[4]) :
+                 service_wifi_direct_start(fields[0], fields[1], fields[2]);
+}
+
+/*
+ * 固定资源的分块读取：每个请求独立开关文件，不保留跨请求句柄。
+ * 响应 DATA = status(1) + offset(4 BE) + total(4 BE) + bytes(0..128)。
+ */
+static void ble_profile_read(const ble_cmd_t *cmd)
+{
+    uint8_t out[9 + BLE_PROFILE_CHUNK_MAX] = {0};
+    uint32_t offset = 0;
+    uint32_t total = 0;
+    uint8_t count = 0;
+    size_t actual = 0;
+    FILE *fp = NULL;
+
+    if(cmd->len != 5 || cmd->pdata == NULL)
+    {
+        out[0] = 4;  /* 参数错误 */
+        goto reply;
+    }
+    offset = ((uint32_t)cmd->pdata[0] << 24) |
+             ((uint32_t)cmd->pdata[1] << 16) |
+             ((uint32_t)cmd->pdata[2] << 8) |
+             (uint32_t)cmd->pdata[3];
+    count = cmd->pdata[4];
+    if(count == 0 || count > BLE_PROFILE_CHUNK_MAX)
+    {
+        out[0] = 4;
+        goto reply;
+    }
+    if((m_film_trans_state != BLE_FILM_TRANS_IDLE &&
+        m_film_trans_state != BLE_FILM_TRANS_STOPPED) ||
+       (m_ota_trans_state != BLE_OTA_TRANS_IDLE &&
+        m_ota_trans_state != BLE_OTA_TRANS_STOPPED) ||
+       service_wifi_direct_busy())
+    {
+        out[0] = 3;  /* 文件写入/直传进行中 */
+        goto reply;
+    }
+
+    fp = fopen(BLE_PROFILE_PATH, "rb");
+    if(fp == NULL)
+    {
+        out[0] = errno == ENOENT ? 1 : 2;
+        goto reply;
+    }
+    if(fseek(fp, 0, SEEK_END) != 0)
+    {
+        out[0] = 2;
+        goto reply;
+    }
+    long size = ftell(fp);
+    if(size < 0 || size > BLE_PROFILE_FILE_MAX)
+    {
+        out[0] = 2;
+        goto reply;
+    }
+    total = (uint32_t)size;
+    if(offset > total)
+    {
+        out[0] = 4;
+        goto reply;
+    }
+    if(fseek(fp, (long)offset, SEEK_SET) != 0)
+    {
+        out[0] = 2;
+        goto reply;
+    }
+    if(count > total - offset) count = (uint8_t)(total - offset);
+    if(count > 0)
+    {
+        actual = fread(&out[9], 1, count, fp);
+        if(actual != count)
+        {
+            actual = 0;
+            out[0] = 2;
+        }
+    }
+
+reply:
+    if(fp != NULL) fclose(fp);
+    out[1] = (uint8_t)(offset >> 24);
+    out[2] = (uint8_t)(offset >> 16);
+    out[3] = (uint8_t)(offset >> 8);
+    out[4] = (uint8_t)offset;
+    out[5] = (uint8_t)(total >> 24);
+    out[6] = (uint8_t)(total >> 16);
+    out[7] = (uint8_t)(total >> 8);
+    out[8] = (uint8_t)total;
+    service_ble_send_resp(BLE_FILM_TRANS_CH_PROFILE_READ, out, (uint8_t)(9 + actual));
+}
+
 static void ble_cmd_process(ble_cmd_t *cmd)
 {
     if(cmd == NULL)
@@ -389,27 +633,113 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         return;
     }
 
+    /* 入睡期间阻止新的写入，但手机仍须能查询/取消正在恢复的直传。 */
+    if(service_monitor_sleep_pending() &&
+       cmd->ch != BLE_FILM_TRANS_CH_DIRECT_STATUS &&
+       cmd->ch != BLE_FILM_TRANS_CH_DIRECT_CANCEL)
+    {
+        return;
+    }
+
+    if(service_wifi_direct_busy() && ble_cmd_conflicts_with_direct(cmd->ch))
+    {
+        const uint8_t busy = 1;
+        service_ble_send_resp(cmd->ch, &busy, 1);
+        return;
+    }
+
     switch(cmd->ch)
     {
+        case BLE_FILM_TRANS_CH_BUILD_INFO_GET:
+        {
+            if(cmd->len != 0) break;
+            const esp_app_desc_t *desc = esp_app_get_description();
+            uint32_t max = service_ota_direct_max();
+            uint8_t data[37 + sizeof(desc->version) + sizeof(desc->project_name)] = {1};
+            for(unsigned i = 0; i < 4; ++i) data[1 + i] = (uint8_t)(max >> (24 - i * 8));
+            memcpy(data + 5, desc->app_elf_sha256, 32);
+            size_t version_len = strnlen(desc->version, sizeof(desc->version) - 1);
+            size_t project_len = strnlen(desc->project_name, sizeof(desc->project_name) - 1);
+            memcpy(data + 37, desc->version, version_len);
+            memcpy(data + 38 + version_len, desc->project_name, project_len);
+            service_ble_send_resp(cmd->ch, data, (uint8_t)(39 + version_len + project_len));
+            break;
+        }
+        case BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY:
+        {
+            if(cmd->len != 0) break;
+            uint8_t result = service_wifi_direct_ota_apply();
+            service_ble_send_resp(cmd->ch, &result, 1);
+            break;
+        }
+        case BLE_FILM_TRANS_CH_DIRECT_OTA_START:
+        case BLE_FILM_TRANS_CH_DIRECT_START:
+        {
+            uint8_t result = ble_direct_start(cmd);
+            service_ble_send_resp(cmd->ch, &result, 1);
+            break;
+        }
+        case BLE_FILM_TRANS_CH_DIRECT_STATUS:
+        {
+            if(cmd->len != 0) break;
+            wifi_direct_status_t status;
+            service_wifi_direct_get_status(&status);
+            uint8_t data[11] = {status.state, status.progress, status.error};
+            for(unsigned i = 0; i < 4; i++)
+            {
+                data[3 + i] = (uint8_t)(status.received >> (24 - 8 * i));
+                data[7 + i] = (uint8_t)(status.total >> (24 - 8 * i));
+            }
+            service_ble_send_resp(cmd->ch, data, sizeof(data));
+            break;
+        }
+        case BLE_FILM_TRANS_CH_DIRECT_CANCEL:
+        {
+            if(cmd->len != 0) break;
+            service_wifi_direct_cancel();
+            const uint8_t accepted = 0;
+            service_ble_send_resp(cmd->ch, &accepted, 1);
+            break;
+        }
+        case BLE_FILM_TRANS_CH_PROFILE_READ:
+            ble_profile_read(cmd);
+            break;
+        case BLE_FILM_TRANS_CH_DEVICE_NAME_GET:
+        case BLE_FILM_TRANS_CH_DEVICE_NAME_SET:
+        {
+            uint8_t status = 0;
+            if(cmd->ch == BLE_FILM_TRANS_CH_DEVICE_NAME_GET)
+                status = cmd->len == 0 ? 0 : 1;
+            else
+                status = service_ble_name_set(cmd->pdata, cmd->len);
+
+            uint8_t response[1 + BLE_DEVICE_NAME_MAX_BYTES + 1] = {status};
+            uint8_t response_len = 1;
+            if(status == 0)
+            {
+                const char *name = service_ble_name_get();
+                size_t name_len = strlen(name) + 1;
+                memcpy(&response[1], name, name_len);
+                response_len += (uint8_t)name_len;
+            }
+            service_ble_send_resp(cmd->ch, response, response_len);
+            break;
+        }
         case BLE_FILM_TRANS_CH_FILE_START :
         {
-            if(m_film_trans_state == BLE_FILM_TRANS_IDLE || m_film_trans_state == BLE_FILM_TRANS_STOPPED)
+            if(ble_file_reset() != 0)
             {
-                m_film_trans_state = BLE_FILM_TRANS_STARTED;
-                m_film_trans_received = 0;
-                memset(m_film_trans_filename, 0, sizeof(m_film_trans_filename));
-                m_film_trans_file_size = 0;
-                sys_logi(BEL_SERVICE_TAG, "Film transfer started");
+                sys_loge(BEL_SERVICE_TAG, "FILE_START: previous transfer abort failed");
+                break;
             }
-            else
-            {
-                sys_logw(BEL_SERVICE_TAG, "Invalid state for FILE_START: %d", m_film_trans_state);
-            }
+            m_film_trans_state = BLE_FILM_TRANS_STARTED;
+            sys_logi(BEL_SERVICE_TAG, "Film transfer started");
             break;
         }
         case BLE_FILM_TRANS_CH_FILE_NAME :
         {
-            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0)
+            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0 &&
+               cmd->len < sizeof(m_film_trans_filename))
             {
                 memcpy(m_film_trans_filename, cmd->pdata, cmd->len);
                 m_film_trans_filename[cmd->len] = '\0';
@@ -427,19 +757,23 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             if(m_film_trans_state == BLE_FILM_TRANS_RECV_NAME && cmd->len == 4)
             {
                 m_film_trans_file_size = (cmd->pdata[0] << 24) | (cmd->pdata[1] << 16) | (cmd->pdata[2] << 8) | cmd->pdata[3];
-                m_film_trans_state = BLE_FILM_TRANS_RECV_LEN;
                 sys_logi(BEL_SERVICE_TAG, "Received file size: %d", m_film_trans_file_size);
 
                 // 文件名含 '/' 视为显式相对路径（如 app/image/cover.film），
                 // 写入 /sdcard/<相对路径>，不参与图片/动图列表与事件
+                int result;
                 if(strchr((const char*)m_film_trans_filename, '/') != NULL)
                 {
-                    service_file_save_start_to((const char*)m_film_trans_filename, m_film_trans_file_size);
+                    result = service_file_save_start_to(FILE_SAVE_BLE,
+                              (const char*)m_film_trans_filename, m_film_trans_file_size);
                 }
                 else
                 {
-                    service_file_save_start((const char*)m_film_trans_filename, m_film_trans_file_size);
+                    result = service_file_save_start(FILE_SAVE_BLE,
+                              (const char*)m_film_trans_filename, m_film_trans_file_size);
                 }
+                if(result == 0) m_film_trans_state = BLE_FILM_TRANS_RECV_LEN;
+                else { sys_loge(BEL_SERVICE_TAG, "FILE_LEN: save start failed"); ble_file_reset(); }
             }
             else
             {
@@ -452,12 +786,21 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             if((m_film_trans_state == BLE_FILM_TRANS_RECV_LEN || m_film_trans_state == BLE_FILM_TRANS_RECV_DATA) && cmd->len > 0)
             {
                 uint8_t *pdata_copy = (uint8_t*)pvPortMalloc(cmd->len);
-                if(pdata_copy)
+                if(pdata_copy && cmd->len <= m_film_trans_file_size - m_film_trans_received)
                 {
                     memcpy(pdata_copy, cmd->pdata, cmd->len);
-                    service_file_save_data((const char*)m_film_trans_filename, m_film_trans_file_size, pdata_copy, cmd->len);
-                    m_film_trans_received += cmd->len;
-                    m_film_trans_state = BLE_FILM_TRANS_RECV_DATA;
+                    if(service_file_save_data(FILE_SAVE_BLE, pdata_copy, cmd->len) == 0)
+                    {
+                        m_film_trans_received += cmd->len;
+                        m_film_trans_state = BLE_FILM_TRANS_RECV_DATA;
+                    }
+                    else { sys_loge(BEL_SERVICE_TAG, "FILE_DATA: write failed"); ble_file_reset(); }
+                }
+                else
+                {
+                    if(pdata_copy) vPortFree(pdata_copy);
+                    sys_loge(BEL_SERVICE_TAG, "FILE_DATA: allocation or length failed");
+                    ble_file_reset();
                 }
             }
             else
@@ -476,9 +819,20 @@ static void ble_cmd_process(ble_cmd_t *cmd)
                 {
                     auto_load = 0;
                 }
-                service_file_save_stop(auto_load);
-                sys_logi(BEL_SERVICE_TAG, "Film transfer stopped, received: %d/%d bytes", m_film_trans_received, m_film_trans_file_size);
-                m_film_trans_state = BLE_FILM_TRANS_STOPPED;
+                int result = -1;
+                if(m_film_trans_received == m_film_trans_file_size)
+                    result = service_file_save_stop(FILE_SAVE_BLE, auto_load);
+                if(result == 0)
+                {
+                    sys_logi(BEL_SERVICE_TAG, "Film transfer saved: %d bytes", m_film_trans_received);
+                    m_film_trans_state = BLE_FILM_TRANS_STOPPED;
+                }
+                else
+                {
+                    sys_loge(BEL_SERVICE_TAG, "FILE_STOP: save failed, received=%d expected=%d",
+                             m_film_trans_received, m_film_trans_file_size);
+                    ble_file_reset();
+                }
             }
             else
             {
@@ -680,13 +1034,8 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CTRL_SLEEPONOFF_GET : // 休眠模式开关查询
         {
             sys_logi(BEL_SERVICE_TAG, "Sleep mode: %s", g_service_param.sleep.sleep_mode ? "ON" : "OFF");
-            uint8_t resp_buf[6];
-            resp_buf[0] = BLE_CMD_HEAD;
-            resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_SLEEPONOFF_GET;
-            resp_buf[2] = 1;
-            resp_buf[3] = g_service_param.sleep.sleep_mode & 0xFF;
-            resp_buf[4] = ble_checksum(resp_buf, 4);
-            service_ble_msg_gatts_data_send(resp_buf, sizeof(resp_buf), MSG_BLE_CH1_OUT_DATA);
+            uint8_t mode = g_service_param.sleep.sleep_mode;
+            service_ble_send_resp(cmd->ch, &mode, 1);
             break;
         }
         case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE : // 定时唤醒开关
@@ -703,13 +1052,8 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_GET : // 定时唤醒开关查询
         {
             sys_logi(BEL_SERVICE_TAG, "Auto wake: %s", g_service_param.sleep.sleep_auto ? "ON" : "OFF");
-            uint8_t resp_buf[6];
-            resp_buf[0] = BLE_CMD_HEAD;
-            resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_GET;
-            resp_buf[2] = 1;
-            resp_buf[3] = g_service_param.sleep.sleep_auto & 0xFF;
-            resp_buf[4] = ble_checksum(resp_buf, 4);
-            service_ble_msg_gatts_data_send(resp_buf, sizeof(resp_buf), MSG_BLE_CH1_OUT_DATA);
+            uint8_t auto_wake = g_service_param.sleep.sleep_auto;
+            service_ble_send_resp(cmd->ch, &auto_wake, 1);
             break;
         }
         case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_TIME : // 定时唤醒时间（单位分钟）
@@ -729,14 +1073,11 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_TIME_GET : // 定时唤醒时间查询（单位分钟）
         {
             sys_logi(BEL_SERVICE_TAG, "Sleep wake time: %d min", g_service_param.sleep.sleep_time);
-            uint8_t resp_buf[7];
-            resp_buf[0] = BLE_CMD_HEAD;
-            resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_SLEEPMODE_TIME_GET;
-            resp_buf[2] = 2;
-            resp_buf[3] = (g_service_param.sleep.sleep_time >> 8) & 0xFF;
-            resp_buf[4] = g_service_param.sleep.sleep_time & 0xFF;
-            resp_buf[5] = ble_checksum(resp_buf, 5);
-            service_ble_msg_gatts_data_send(resp_buf, sizeof(resp_buf), MSG_BLE_CH1_OUT_DATA);
+            uint8_t time_min[2] = {
+                (uint8_t)(g_service_param.sleep.sleep_time >> 8),
+                (uint8_t)g_service_param.sleep.sleep_time,
+            };
+            service_ble_send_resp(cmd->ch, time_min, sizeof(time_min));
             break;
         }
         case BLE_FILM_TRANS_CH_CTRL_SDRESET : // SD卡格式化

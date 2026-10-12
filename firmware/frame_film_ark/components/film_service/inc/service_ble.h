@@ -94,6 +94,18 @@ extern "C"{
 // 注：dock 固件没有 app 层（按键是 PC 键盘），未实现此号。
 #define BLE_FILM_TRANS_CH_CTRL_KEY_INJECT                  (0x4E) // 远程按键注入
 
+// Ark 临时直传：凭据仅在本次 RAM 会话使用，不改持久化 WiFi 配网。
+#define BLE_FILM_TRANS_CH_DIRECT_START                     (0x50)
+#define BLE_FILM_TRANS_CH_DIRECT_STATUS                    (0x51)
+#define BLE_FILM_TRANS_CH_DIRECT_CANCEL                    (0x52)
+#define BLE_FILM_TRANS_CH_PROFILE_READ                     (0x53) // Ark 通行证资料 JSON 分块读取
+#define BLE_FILM_TRANS_CH_DEVICE_NAME_GET                  (0x54) // 查询已配置完整名称
+#define BLE_FILM_TRANS_CH_DEVICE_NAME_SET                  (0x55) // 设置 UTF-8 后缀 + NUL，下次 BLE 初始化生效
+#define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
+#define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
+#define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
+#define BLE_DIRECT_START_DATA_MAX                         (192)
+
 /* KEY_INJECT 的键值。与 input_press_type_t 无关：协议层不依赖 HAL 枚举，
  * 映射在 app 层完成（见 app_manager 的按键注入分支）。
  * 覆盖本机全部按键语义：上下选择 / 确认单击 / 确认双击（退回）/ 确认长按（休眠）。 */
@@ -179,6 +191,9 @@ extern void service_ble_init(void);
 extern void service_ble_apply_enable(uint8_t on);
 extern void service_ble_msg_send(void *p_msg, bool in_isr);
 extern void service_ble_msg_gatts_cmd_send( uint8_t const *p_data, uint16_t len );
+extern void service_ble_transfer_disconnected(void); // GATT 回调中仅标记，不阻塞
+/* 入睡屏障：拒收新命令，等待 BLE 任务取消并关闭其文件写入。 */
+extern bool service_ble_prepare_sleep(void);
 extern void service_ble_msg_gatts_data_send( uint8_t const *p_data, uint16_t len, uint8_t ch);
 
 /**

@@ -41,7 +41,10 @@
 
 #include "ui_core.h"
 #include "ui_assets.h"
+#include "ui_fonts.h"
 #include "ui_ops.h"
+#include "app_shell.h"
+#include "app_language.h"
 #include "app_manager.h"
 #include "app_sleep.h"
 
@@ -54,9 +57,8 @@
  * 整屏 480x720，**不带外壳**（没有状态栏与提示行），故坐标就是屏幕坐标。
  * 与设计稿 tools/ui-mockup §08 的表格逐行对应；构图块高 448、垂直居中于 y=136。
  *
- * 改这里等于改那张表。徽章尺寸取自资源规格（ui_assets.h 的 UI_BADGE_H），
- * 所以换徽章尺寸时下面的相对间距需要复核。 */
-#define SP_BADGE_Y          (136)    // 徽章顶部（304x272，水平居中）
+ * logo + 彩蛋使用 APP_SHELL_BRAND_H；底部状态与唤醒说明保持原位置。 */
+#define SP_BADGE_Y          (104)    // logo 与彩蛋顶部（440x304，水平居中）
 #define SP_RULE1_Y          (452)    // 徽章下 44px
 #define SP_WORD_Y           (473)    // 细线下 20px
 #define SP_RULE2_Y          (551)    // 状态字下 20px
@@ -86,7 +88,7 @@
 
 /* 除地板时间外，还要等唤醒条件解除（ext0 电平触发，长按期间它一直是成立的）。
  * 这条只会让入睡**更晚**、不会更早，所以与地板时间是叠加关系而非二选一。 */
-#define SP_RELEASE_MAX_MS   (15000)  // 一直按着不放的兜底上限
+#define SP_RELEASE_MAX_MS   (15000)  // app 阻塞等待上限；超时后由 monitor 继续等松手
 #define SP_POLL_MS          (50)
 
 /*********************************************************************
@@ -140,7 +142,7 @@ static void sleep_rule(lv_obj_t *root, int32_t y)
 }
 
 /**
- * @brief 页脚文案：AUTO WAKE hh:mm（开了）或 AUTO WAKE OFF（没开）
+ * @brief 页脚文案：定时唤醒时刻或关闭状态。
  *
  * 显示的"时刻"由当前时间 + 唤醒间隔算出，与 monitor 任务侧设置的定时唤醒同一含义。
  */
@@ -152,65 +154,65 @@ static void sleep_foot_text(char *buf)
 
     if(!m_auto_on)
     {
-        snprintf(buf, SP_FOOT_BUF_LEN, "AUTO WAKE OFF");
+        snprintf(buf, SP_FOOT_BUF_LEN, "%s", app_text("定时唤醒已关闭", "AUTO WAKE OFF"));
         return;
     }
 
     wake = time(NULL) + (time_t)m_minutes * 60;
     if(localtime_r(&wake, &tmv) == NULL)
     {
-        snprintf(buf, SP_FOOT_BUF_LEN, "AUTO WAKE --:--");
+        snprintf(buf, SP_FOOT_BUF_LEN, "%s", app_text("定时唤醒 --:--", "AUTO WAKE --:--"));
         return;
     }
 
     /* 收敛到窄类型：GCC 按 int 全域推演 %02u 会判为可能截断（本项目 -Wformat-truncation 是错误级） */
     hour   = (unsigned)tmv.tm_hour & 0xFFu;
     minute = (unsigned)tmv.tm_min  & 0xFFu;
-    snprintf(buf, SP_FOOT_BUF_LEN, "AUTO WAKE %02u:%02u", hour, minute);
+    snprintf(buf, SP_FOOT_BUF_LEN, app_text("定时唤醒 %02u:%02u", "AUTO WAKE %02u:%02u"), hour, minute);
 }
 
 static void sleep_ui_create(lv_obj_t *root)
 {
     lv_obj_t *o;
-    const void *src;
     char buf[SP_FOOT_BUF_LEN];
 
     sys_logi(APP_SLEEP_TAG, "create sleep card (auto_wake=%u, %u min)",
              (unsigned)m_auto_on, (unsigned)m_minutes);
 
-    /* ---- 徽章：与开机页同一份资源（SD 可替换） ---- */
-    src = ui_assets_badge();
-    o = lv_image_create(root);
-    if(src != NULL)
-    {
-        lv_image_set_src(o, src);
-    }
+    /* 与开机页共用 logo 和每次展示独立抽取的 10% 概率彩蛋。 */
+    o = app_shell_brandmark(root);
     lv_obj_align(o, LV_ALIGN_TOP_MID, 0, SP_BADGE_Y);
+
+    o = lv_label_create(root);
+    lv_obj_set_style_text_font(o, &ui_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
+    lv_label_set_text(o, "PRTS SYNTHESIZE INFORMATION ANALYSIS OS");
+    lv_obj_align(o, LV_ALIGN_TOP_MID, 0, SP_BADGE_Y + APP_SHELL_BRAND_H + 12);
 
     /* ---- 细线 + 状态字 + 细线：与开机页同一套骨架，大字换成"我现在怎样" ---- */
     sleep_rule(root, SP_RULE1_Y);
 
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, &ui_font_36, LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_WORD_LS, LV_PART_MAIN);
-    lv_label_set_text(o, "STANDBY");
+    lv_label_set_text(o, app_text("已休眠", "STANDBY"));
     lv_obj_align(o, LV_ALIGN_TOP_MID, SP_WORD_LS / 2, SP_WORD_Y);
 
     sleep_rule(root, SP_RULE2_Y);
 
     /* ---- 唤醒说明 ---- */
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, &ui_font_18, LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_MICRO_LS, LV_PART_MAIN);
-    lv_label_set_text(o, "PRESS ENTER TO WAKE");
+    lv_label_set_text(o, app_text("按确认键唤醒", "PRESS ENTER TO WAKE"));
     lv_obj_align(o, LV_ALIGN_TOP_MID, SP_MICRO_LS / 2, SP_WAKE_Y);
 
     /* ---- 页脚：锚在屏幕底边，不参与居中构图 ---- */
     sleep_foot_text(buf);
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &lv_font_unscii_8, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, &ui_font_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_MICRO_LS, LV_PART_MAIN);
     lv_label_set_text(o, buf);
@@ -248,7 +250,7 @@ static void sleep_wait_ready(uint8_t wait_frame)
         }
         if(elapsed >= limit)
         {
-            sys_logw(APP_SLEEP_TAG, "wake pin still active after %u ms, sleep anyway",
+            sys_logw(APP_SLEEP_TAG, "wake pin still active after %u ms, monitor will wait for release",
                      (unsigned)SP_RELEASE_MAX_MS);
             return;
         }

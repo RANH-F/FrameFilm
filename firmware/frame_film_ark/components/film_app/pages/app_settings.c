@@ -44,10 +44,12 @@
 
 #include "ui_conf.h"    /* UI_CMD_DATA_MAX（快照尺寸断言） */
 #include "ui_ops.h"
+#include "ui_fonts.h"
 #include "app_shell.h"
 #include "app_image.h"      /* 图片 app 参数 TAG / 取值范围（app 参数行用） */
 #include "app_animation.h"  /* 动图 app 参数 TAG / 取值范围 */
 #include "app_boot_cfg.h"   /* 开机行为参数（BOOT PAGE / START APP 两行） */
+#include "app_language.h"
 #include "app_settings.h"
 #include "app_manager.h"
 
@@ -56,7 +58,7 @@
  */
 #define APP_SET_TAG         "app_set"
 
-#define ROW_H               (29)     // 行高（17 行要塞进 586px，见 SET_LIST_H 处的高度核算）
+#define ROW_H               (29)     // 行高（18 行，分节标题缩为 17px）
 #define Y_LIST              (66)     // 列表起点（表头 + 分节标题之下）
 
 /* BATTERY 行的电量条几何：外框 62 宽（含 1px 描边），填充按内宽 60 按比例给 */
@@ -70,14 +72,14 @@
 /* 循环取值的候选项（也是校验表，上报值必须落在其中） */
 #define WAKE_OPT_NUM        (8)
 static const char *const WAKE_OPTS[WAKE_OPT_NUM] = {
-    "10 MIN", "30 MIN", "60 MIN", "2 H", "6 H", "12 H", "24 H", "48 H"
+    "10分钟", "30分钟", "60分钟", "2小时", "6小时", "12小时", "24小时", "48小时"
 };
 static const uint16_t WAKE_OPTS_MIN[WAKE_OPT_NUM] = {
     10, 30, 60, 120, 360, 720, 1440, 2880       // 与 WAKE_OPTS 一一对应的分钟值
 };
 #define HB_OPT_NUM          (6)
 static const char *const HB_OPTS[HB_OPT_NUM] = {
-    "5 S", "10 S", "30 S", "60 S", "120 S", "180 S"
+    "5秒", "10秒", "30秒", "60秒", "120秒", "180秒"
 };
 static const uint16_t HB_OPTS_SEC[HB_OPT_NUM] = {
     5, 10, 30, 60, 120, 180                      // 与 HB_OPTS 一一对应的秒值
@@ -86,7 +88,7 @@ static const uint16_t HB_OPTS_SEC[HB_OPT_NUM] = {
 /* ---- LED 模式（下标 == 落盘值，与 service_param.h 的 SERVICE_LED_MODE_* 同序）---- */
 #define LED_OPT_NUM         (SERVICE_LED_MODE_NUM)
 static const char *const LED_OPTS[LED_OPT_NUM] = {
-    "ALWAYS", "OFF", "AUTO"                      // 常亮 / 关闭 / 闲置自动熄灭
+    "持续呼吸", "关闭"                           // 持续呼吸 / 关闭
 };
 
 /* ---- 开机行为（BOOT PAGE / START APP）----
@@ -94,11 +96,11 @@ static const char *const LED_OPTS[LED_OPT_NUM] = {
  * 存的就是下标本身（协议/落盘值即候选下标）。 */
 #define BOOTPAGE_OPT_NUM    (2)
 static const char *const BOOTPAGE_OPTS[BOOTPAGE_OPT_NUM] = {
-    "SHOW", "SKIP"                              // 下标 0/1 == APP_BOOT_PAGE_SHOW/SKIP
+    "显示", "跳过"                              // 下标 0/1 == APP_BOOT_PAGE_SHOW/SKIP
 };
 #define STARTAPP_OPT_NUM    (APP_START_NUM)
 static const char *const STARTAPP_OPTS[STARTAPP_OPT_NUM] = {
-    "MENU", "LAST", "IMAGE", "TEMPLATE", "CLOCK", "ANIMATION", "SETTINGS", "PASS"
+    "菜单", "上次", "图片", "模板", "时钟", "动图", "设置", "通行证"
 };                                              // 顺序 == app_start_t
 
 /* ---- app 参数行的候选值 ----
@@ -106,22 +108,22 @@ static const char *const STARTAPP_OPTS[STARTAPP_OPT_NUM] = {
  * 这里只规定"界面上给几个档位"以及下标 ↔ 物理值的对照。 */
 #define IMG_PLAY_OPT_NUM    (2)
 static const char *const IMG_PLAY_OPTS[IMG_PLAY_OPT_NUM] = {
-    "MANUAL", "AUTO"                            // 下标 0/1 == APP_IMAGE_PLAY_MANUAL/AUTO
+    "手动", "自动"                            // 下标 0/1 == APP_IMAGE_PLAY_MANUAL/AUTO
 };
 #define IMG_INT_OPT_NUM     (5)
 static const char *const IMG_INT_OPTS[IMG_INT_OPT_NUM] = {
-    "1 MIN", "5 MIN", "10 MIN", "30 MIN", "60 MIN"
+    "1分钟", "5分钟", "10分钟", "30分钟", "60分钟"
 };
 static const uint16_t IMG_INT_OPTS_MIN[IMG_INT_OPT_NUM] = {
     1, 5, 10, 30, 60                            // 分钟（参数范围 1~120）
 };
 #define ANIM_LOOP_OPT_NUM   (2)
 static const char *const ANIM_LOOP_OPTS[ANIM_LOOP_OPT_NUM] = {
-    "SINGLE", "LIST"                            // 下标 0/1 == APP_ANIM_PLAY_SINGLE/SEQ
+    "单个", "列表"                            // 下标 0/1 == APP_ANIM_PLAY_SINGLE/SEQ
 };
 #define ANIM_SPEED_OPT_NUM  (5)
 static const char *const ANIM_SPEED_OPTS[ANIM_SPEED_OPT_NUM] = {
-    "100 MS", "200 MS", "500 MS", "1 S", "2 S"
+    "100毫秒", "200毫秒", "500毫秒", "1秒", "2秒"
 };
 static const uint16_t ANIM_SPEED_OPTS_MS[ANIM_SPEED_OPT_NUM] = {
     100, 200, 500, 1000, 2000                   // 每帧毫秒（参数范围 100~2000）
@@ -129,19 +131,19 @@ static const uint16_t ANIM_SPEED_OPTS_MS[ANIM_SPEED_OPT_NUM] = {
 
 /* 分节标题（行表里的 sec 即下标） */
 static const char *const SEC_TITLES[] = {
-    "DEVICE", "PARAMETERS", "APP PARAMS"
+    "设备", "系统参数", "应用参数"
 };
 
 /* 快照要经 ui_core_post 一次性下发，长度受命令负载上限约束 */
 _Static_assert(sizeof(settings_snapshot_t) <= UI_CMD_DATA_MAX,
                "settings_snapshot_t exceeds ui cmd payload");
 
-/* 列表总高：3 个分节标题（3 行标题 + 3 处 4px 间距） + 17 行。
+/* 列表总高：3 个分节标题（3 行标题 + 3 处 4px 间距） + 18 行。
    正文可用高度 = 720 - 状态栏 30 - 提示行 28 - 上下留白 36 = 626，
-   扣掉表头 16 + 间距 24 后余 586 —— 列表 571 装得下，不会溢出到提示行。
-   ⚠ ROW_H 是从 30 压到 29 才塞下第 17 行的（30 时列表 588 > 586）。
+   扣掉表头 16 + 间距 24 后余 586 —— 列表 585 装得下，不会溢出到提示行。
+   行高仍为 29；新增语言行的 14px 来自三个分节标题各收 5px。
    再加行就必须先压缩分节标题或拆页，别再动 ROW_H（再压行内文字会挤）。 */
-#define SET_LIST_H          (3 * (22 + 4) + SETTINGS_ROW_NUM * ROW_H)
+#define SET_LIST_H          (3 * (17 + 4) + SETTINGS_ROW_NUM * ROW_H)
 
 /*********************************************************************
 * TYPEDEFS
@@ -157,30 +159,42 @@ typedef struct {
 enum {
     F_BAT = 0, F_WIFI, F_BT, F_LED, F_PANEL, F_STORAGE, F_FW,
     F_SLEEP, F_AUTOWAKE, F_WIFI_ON, F_BT_ON, F_WAKE_SEL, F_HB_SEL,
-    F_BOOT_PAGE, F_START_APP,
+    F_BOOT_PAGE, F_START_APP, F_LANGUAGE,
     F_IMG_PLAY, F_IMG_INT, F_ANIM_LOOP, F_ANIM_SPEED,
 };
 
 /* 行表。**顺序即显示顺序，下标即上报的行号。** */
 static const settings_row_t ROWS[SETTINGS_ROW_NUM] = {
-    { 0, "BATTERY",      SET_KIND_BAR,    F_BAT        },
-    { 0, "WIFI",         SET_KIND_TOGGLE, F_WIFI_ON    },
-    { 0, "BLUETOOTH",    SET_KIND_TOGGLE, F_BT_ON      },
-    { 0, "LED",          SET_KIND_CYCLE,  F_LED        },
-    { 0, "PANEL",        SET_KIND_TEXT,   F_PANEL      },
-    { 0, "STORAGE",      SET_KIND_TEXT,   F_STORAGE    },
-    { 0, "FIRMWARE",     SET_KIND_TEXT,   F_FW         },
-    { 1, "BOOT PAGE",    SET_KIND_CYCLE,  F_BOOT_PAGE  },
-    { 1, "START APP",    SET_KIND_CYCLE,  F_START_APP  },
-    { 1, "SLEEP MODE",   SET_KIND_TOGGLE, F_SLEEP      },
-    { 1, "AUTO WAKE",    SET_KIND_TOGGLE, F_AUTOWAKE   },
-    { 1, "WAKE INTERVAL",SET_KIND_CYCLE,  F_WAKE_SEL   },
-    { 1, "HEARTBEAT",    SET_KIND_CYCLE,  F_HB_SEL     },
-    { 2, "IMG PLAY",     SET_KIND_CYCLE,  F_IMG_PLAY   },
-    { 2, "IMG INTERVAL", SET_KIND_CYCLE,  F_IMG_INT    },
-    { 2, "ANIM LOOP",    SET_KIND_CYCLE,  F_ANIM_LOOP  },
-    { 2, "ANIM SPEED",   SET_KIND_CYCLE,  F_ANIM_SPEED },
+    { 0, "电量",         SET_KIND_BAR,    F_BAT        },
+    { 0, "WiFi",         SET_KIND_TOGGLE, F_WIFI_ON    },
+    { 0, "蓝牙",         SET_KIND_TOGGLE, F_BT_ON      },
+    { 0, "指示灯",       SET_KIND_CYCLE,  F_LED        },
+    { 0, "屏幕",         SET_KIND_TEXT,   F_PANEL      },
+    { 0, "存储",         SET_KIND_TEXT,   F_STORAGE    },
+    { 0, "固件",         SET_KIND_TEXT,   F_FW         },
+    { 1, "开机画面",     SET_KIND_CYCLE,  F_BOOT_PAGE  },
+    { 1, "启动应用",     SET_KIND_CYCLE,  F_START_APP  },
+    { 1, "语言 / Language", SET_KIND_CYCLE, F_LANGUAGE },
+    { 1, "自动休眠",     SET_KIND_TOGGLE, F_SLEEP      },
+    { 1, "定时唤醒",     SET_KIND_TOGGLE, F_AUTOWAKE   },
+    { 1, "唤醒间隔",     SET_KIND_CYCLE,  F_WAKE_SEL   },
+    { 1, "心跳间隔",     SET_KIND_CYCLE,  F_HB_SEL     },
+    { 2, "图片播放",     SET_KIND_CYCLE,  F_IMG_PLAY   },
+    { 2, "图片间隔",     SET_KIND_CYCLE,  F_IMG_INT    },
+    { 2, "动图播放",     SET_KIND_CYCLE,  F_ANIM_LOOP  },
+    { 2, "动图速度",     SET_KIND_CYCLE,  F_ANIM_SPEED },
 };
+static const char *const ROW_KEYS_EN[SETTINGS_ROW_NUM] = {
+    "BATTERY", "WIFI", "BLUETOOTH", "LED", "PANEL", "STORAGE", "FIRMWARE",
+    "BOOT PAGE", "START APP", "LANGUAGE", "SLEEP MODE", "AUTO WAKE",
+    "WAKE INTERVAL", "HEARTBEAT", "IMG PLAY", "IMG INTERVAL", "ANIM LOOP", "ANIM SPEED"
+};
+static const char *const WAKE_EN[] = {"10 MIN", "30 MIN", "60 MIN", "2 H", "6 H", "12 H", "24 H", "48 H"};
+static const char *const HB_EN[] = {"5 S", "10 S", "30 S", "60 S", "120 S", "180 S"};
+static const char *const START_EN[] = {"MENU", "LAST", "IMAGE", "TEMPLATE", "CLOCK", "ANIMATION", "SETTINGS", "PASS"};
+static const char *const IMG_INT_EN[] = {"1 MIN", "5 MIN", "10 MIN", "30 MIN", "60 MIN"};
+static const char *const SPEED_EN[] = {"100 MS", "200 MS", "500 MS", "1 S", "2 S"};
+static const char *const SEC_EN[] = {"DEVICE", "PARAMETERS", "APP PARAMS"};
 
 /*********************************************************************
  * LOCAL VARIABLES
@@ -193,6 +207,8 @@ static lv_obj_t *m_row_tog[SETTINGS_ROW_NUM];    // 开关块
 static lv_obj_t *m_row_ptr[SETTINGS_ROW_NUM];    // 选择指针（只读行恒隐藏）
 static lv_obj_t *m_row_st[SETTINGS_ROW_NUM];     // 开关行左侧的状态文案（仅 WiFi/蓝牙行非空）
 static lv_obj_t *m_row_idx_label = NULL;
+static lv_obj_t *m_head_label = NULL;
+static lv_obj_t *m_sec_label[3];
 
 static app_shell_t m_shell;      // 顶部状态栏（数据复用设置快照，不额外往返）
 static settings_snapshot_t m_snap;
@@ -241,23 +257,38 @@ static int row_is_ro(uint8_t idx)
  */
 static const char *row_text(uint8_t idx)
 {
+    static char storage_text[24];
+
     switch(ROWS[idx].field)
     {
     case F_BAT:        return m_snap.bat;
-    case F_WIFI:       return m_snap.wifi;
-    case F_BT:         return m_snap.bt;
+    case F_WIFI_ON:    return !m_snap.wifi_on ? app_text("已关闭", "Off") :
+                              (m_snap.wifi_conn ? app_text("已连接", "Connected") : app_text("未连接", "Idle"));
+    case F_BT_ON:      return !m_snap.bt_on ? app_text("已关闭", "Off") :
+                              (m_snap.bt_conn ? app_text("已连接", "Connected") : app_text("等待连接", "Waiting"));
     case F_PANEL:      return m_snap.panel;
-    case F_STORAGE:    return m_snap.storage;
+    case F_STORAGE:
+    {
+        unsigned count;
+        if(sscanf(m_snap.storage, "%u FILM", &count) == 1)
+        {
+            (void)snprintf(storage_text, sizeof(storage_text), app_text("%u 张", "%u films"), count);
+            return storage_text;
+        }
+        return app_text("未插卡", "No SD");
+    }
     case F_FW:         return m_snap.fw;
-    case F_WAKE_SEL:   return WAKE_OPTS[m_snap.wake_sel % WAKE_OPT_NUM];
-    case F_HB_SEL:     return HB_OPTS[m_snap.hb_sel % HB_OPT_NUM];
-    case F_BOOT_PAGE:  return BOOTPAGE_OPTS[m_snap.boot_page_sel % BOOTPAGE_OPT_NUM];
-    case F_START_APP:  return STARTAPP_OPTS[m_snap.start_app_sel % STARTAPP_OPT_NUM];
-    case F_LED:        return LED_OPTS[m_snap.led_mode_sel % LED_OPT_NUM];
-    case F_IMG_PLAY:   return IMG_PLAY_OPTS[m_snap.img_play_sel % IMG_PLAY_OPT_NUM];
-    case F_IMG_INT:    return IMG_INT_OPTS[m_snap.img_interval_sel % IMG_INT_OPT_NUM];
-    case F_ANIM_LOOP:  return ANIM_LOOP_OPTS[m_snap.anim_loop_sel % ANIM_LOOP_OPT_NUM];
-    case F_ANIM_SPEED: return ANIM_SPEED_OPTS[m_snap.anim_speed_sel % ANIM_SPEED_OPT_NUM];
+    case F_WAKE_SEL:   return app_text(WAKE_OPTS[m_snap.wake_sel % WAKE_OPT_NUM], WAKE_EN[m_snap.wake_sel % WAKE_OPT_NUM]);
+    case F_HB_SEL:     return app_text(HB_OPTS[m_snap.hb_sel % HB_OPT_NUM], HB_EN[m_snap.hb_sel % HB_OPT_NUM]);
+    case F_BOOT_PAGE:  return app_text(BOOTPAGE_OPTS[m_snap.boot_page_sel % BOOTPAGE_OPT_NUM],
+                                  m_snap.boot_page_sel ? "SKIP" : "SHOW");
+    case F_START_APP:  return app_text(STARTAPP_OPTS[m_snap.start_app_sel % STARTAPP_OPT_NUM], START_EN[m_snap.start_app_sel % STARTAPP_OPT_NUM]);
+    case F_LANGUAGE:   return m_snap.language_sel ? "English" : "简体中文";
+    case F_LED:        return app_text(LED_OPTS[m_snap.led_mode_sel % LED_OPT_NUM], m_snap.led_mode_sel ? "OFF" : "ALWAYS");
+    case F_IMG_PLAY:   return app_text(IMG_PLAY_OPTS[m_snap.img_play_sel % IMG_PLAY_OPT_NUM], m_snap.img_play_sel ? "AUTO" : "MANUAL");
+    case F_IMG_INT:    return app_text(IMG_INT_OPTS[m_snap.img_interval_sel % IMG_INT_OPT_NUM], IMG_INT_EN[m_snap.img_interval_sel % IMG_INT_OPT_NUM]);
+    case F_ANIM_LOOP:  return app_text(ANIM_LOOP_OPTS[m_snap.anim_loop_sel % ANIM_LOOP_OPT_NUM], m_snap.anim_loop_sel ? "LIST" : "SINGLE");
+    case F_ANIM_SPEED: return app_text(ANIM_SPEED_OPTS[m_snap.anim_speed_sel % ANIM_SPEED_OPT_NUM], SPEED_EN[m_snap.anim_speed_sel % ANIM_SPEED_OPT_NUM]);
     default:           return "";
     }
 }
@@ -405,6 +436,7 @@ static void settings_snapshot_pull(void)
     /* 开机行为（app 层参数，存在 app7 槽位）：下标即存盘值，直接取 */
     m_snap.boot_page_sel = app_boot_cfg_get()->boot_page % BOOTPAGE_OPT_NUM;
     m_snap.start_app_sel = app_boot_cfg_get()->start_app % STARTAPP_OPT_NUM;
+    m_snap.language_sel = app_language_get();
 
     /* app 参数不在 service_param 里，走归属 app 的参数通道读回 */
     settings_app_params_pull();
@@ -510,6 +542,10 @@ static void settings_apply(uint8_t row, uint8_t value)
     case F_START_APP:
         if(value >= STARTAPP_OPT_NUM) { return; }
         app_boot_cfg_set(app_boot_cfg_get()->boot_page, value);
+        break;
+    case F_LANGUAGE:
+        if(value > APP_LANGUAGE_EN) { return; }
+        app_language_set(value);
         break;
 
     /* ---- app 参数：转交归属 app 的参数通道（TAG/范围由 app 自己的头文件定） ---- */
@@ -625,6 +661,9 @@ static void set_apply(void)
         if(m_row_key[i] != NULL)
         {
             lv_obj_set_style_text_color(m_row_key[i], fg, LV_PART_MAIN);
+            lv_label_set_text(m_row_key[i], app_text(r->key, ROW_KEYS_EN[i]));
+            lv_obj_set_style_text_font(m_row_key[i], app_language_get() == APP_LANGUAGE_EN ?
+                                       &lv_font_montserrat_14 : &ui_font_14, LV_PART_MAIN);
         }
         if(m_row_ptr[i] != NULL)
         {
@@ -635,6 +674,10 @@ static void set_apply(void)
         if(m_row_val[i] != NULL)
         {
             lv_obj_set_style_text_color(m_row_val[i], fg, LV_PART_MAIN);
+            lv_obj_set_style_text_font(m_row_val[i],
+                                       app_language_get() == APP_LANGUAGE_EN &&
+                                       !(r->field == F_LANGUAGE && m_snap.language_sel == APP_LANGUAGE_ZH_CN) ?
+                                       &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
             /* 开关行的 ON/OFF 由下面的开关块分支接管，其余（含电量条的 "82%"）都取快照文本 */
             if(r->kind != SET_KIND_TOGGLE)
             {
@@ -651,7 +694,7 @@ static void set_apply(void)
             lv_obj_set_style_bg_opa(m_row_tog[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
             if(m_row_val[i] != NULL)
             {
-                lv_label_set_text(m_row_val[i], on ? "ON" : "OFF");
+                lv_label_set_text(m_row_val[i], on ? app_text("开", "ON") : app_text("关", "OFF"));
                 /* ON 时文字要相对开关自身底色反色 */
                 lv_obj_set_style_text_color(m_row_val[i],
                                             on ? (sel ? lv_color_black() : lv_color_white()) : fg,
@@ -662,6 +705,7 @@ static void set_apply(void)
         {
             /* 开关行左侧的状态文案（WiFi / 蓝牙）：取设备侧真实状态，随快照刷新 */
             lv_obj_set_style_text_color(m_row_st[i], fg, LV_PART_MAIN);
+            lv_obj_set_style_text_font(m_row_st[i], app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
             lv_label_set_text(m_row_st[i], row_text(i));
         }
         if(m_row_fill[i] != NULL)
@@ -674,17 +718,34 @@ static void set_apply(void)
 
     if(m_row_idx_label != NULL)
     {
+        lv_obj_set_style_text_font(m_row_idx_label, app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
         if(m_sel < SETTINGS_ROW_NUM)
         {
-            lv_label_set_text_fmt(m_row_idx_label, "ROW %02u / %02u",
+            lv_label_set_text_fmt(m_row_idx_label, app_text("第 %02u / %02u 项", "ROW %02u / %02u"),
                                   (unsigned)(m_sel + 1), (unsigned)SETTINGS_ROW_NUM);
         }
         else
         {
             /* 还没选中任何行（刚进页面） */
-            lv_label_set_text_fmt(m_row_idx_label, "ROW -- / %02u", (unsigned)SETTINGS_ROW_NUM);
+            lv_label_set_text_fmt(m_row_idx_label, app_text("未选 / %02u 项", "ROW -- / %02u"), (unsigned)SETTINGS_ROW_NUM);
         }
     }
+    if(m_head_label != NULL)
+    {
+        lv_label_set_text(m_head_label, app_text("系统设置", "SYSTEM CONFIGURATION"));
+        lv_obj_set_style_text_font(m_head_label, app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+    }
+    for(i = 0; i < 3; i++)
+    {
+        if(m_sec_label[i] != NULL)
+        {
+            lv_label_set_text(m_sec_label[i], app_text(SEC_TITLES[i], SEC_EN[i]));
+            lv_obj_set_style_text_font(m_sec_label[i], app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+        }
+    }
+    app_shell_set_text(&m_shell,
+                       app_text("上下选择  确认修改  双击返回  长按休眠", "UP/DOWN  ENTER TOGGLE  DBL EXIT  HOLD SLEEP"),
+                       app_text("设置", "SETTINGS"));
 }
 
 /**
@@ -754,6 +815,8 @@ static void set_toggle(void)
                         req[1] = m_snap.boot_page_sel; break;
     case F_START_APP:   m_snap.start_app_sel = (uint8_t)((m_snap.start_app_sel + 1) % STARTAPP_OPT_NUM);
                         req[1] = m_snap.start_app_sel; break;
+    case F_LANGUAGE:    m_snap.language_sel = (uint8_t)!m_snap.language_sel;
+                        req[1] = m_snap.language_sel; break;
     case F_IMG_PLAY:    m_snap.img_play_sel     = (uint8_t)((m_snap.img_play_sel + 1) % IMG_PLAY_OPT_NUM);
                         req[1] = m_snap.img_play_sel;      break;
     case F_IMG_INT:     m_snap.img_interval_sel = (uint8_t)((m_snap.img_interval_sel + 1) % IMG_INT_OPT_NUM);
@@ -781,8 +844,9 @@ static void set_ui_create(lv_obj_t *root)
     sys_logi(APP_SET_TAG, "create settings page");
 
     /* 外壳：顶部状态栏 + 底部提示行（与主菜单同一套版式） */
-    app_shell_build(root, "UP/DOWN  ENTER TOGGLE  DBL EXIT  HOLD SLEEP",
-                    "SETTINGS", &m_shell);
+    app_shell_build(root, app_text("上下选择  确认修改  双击返回  长按休眠",
+                                   "UP/DOWN  ENTER TOGGLE  DBL EXIT  HOLD SLEEP"),
+                    app_text("设置", "SETTINGS"), &m_shell);
 
     /* 正文：夹在状态栏与提示行之间，左右留安全边距 */
     body = lv_obj_create(root);
@@ -799,8 +863,8 @@ static void set_ui_create(lv_obj_t *root)
     lv_obj_set_scrollable(head, false);
     lv_obj_set_size(head, LV_PCT(100), 16);
     lv_obj_set_pos(head, 0, 0);
-    set_label(head, &lv_font_unscii_8, lv_color_black(), "SYSTEM CONFIGURATION");
-    m_row_idx_label = set_label(head, &lv_font_unscii_8, lv_color_black(), "");
+    m_head_label = set_label(head, &ui_font_14, lv_color_black(), app_text("系统设置", "SYSTEM CONFIGURATION"));
+    m_row_idx_label = set_label(head, &ui_font_14, lv_color_black(), "");
     lv_obj_align(m_row_idx_label, LV_ALIGN_TOP_RIGHT, 0, 0);
 
     list = lv_obj_create(body);
@@ -824,28 +888,29 @@ static void set_ui_create(lv_obj_t *root)
             cur_sec = r->sec;
             lv_obj_remove_style_all(sh);
             lv_obj_set_scrollable(sh, false);
-            lv_obj_set_size(sh, LV_PCT(100), 22);
+            lv_obj_set_size(sh, LV_PCT(100), 17);
             lv_obj_set_pos(sh, 0, y);
-            y += 26;
+            y += 21;
 
             tab = lv_obj_create(sh);
             lv_obj_remove_style_all(tab);
             lv_obj_set_scrollable(tab, false);
-            lv_obj_set_size(tab, 78, 18);
+            lv_obj_set_size(tab, 96, 17);
             lv_obj_set_style_bg_color(tab, lv_color_black(), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, LV_PART_MAIN);
             {
-                lv_obj_t *t = set_label(tab, &lv_font_unscii_8, lv_color_white(),
-                                        SEC_TITLES[cur_sec % (sizeof(SEC_TITLES) / sizeof(SEC_TITLES[0]))]);
+                lv_obj_t *t = set_label(tab, &ui_font_14, lv_color_white(),
+                                        app_text(SEC_TITLES[cur_sec], SEC_EN[cur_sec]));
                 lv_obj_center(t);
+                m_sec_label[cur_sec] = t;
             }
             line = lv_obj_create(sh);
             lv_obj_remove_style_all(line);
             lv_obj_set_scrollable(line, false);
-            lv_obj_set_size(line, 340, 1);
+            lv_obj_set_size(line, 322, 1);
             lv_obj_set_style_bg_color(line, lv_color_black(), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(line, LV_OPA_COVER, LV_PART_MAIN);
-            lv_obj_align(line, LV_ALIGN_LEFT_MID, 86, 0);
+            lv_obj_align(line, LV_ALIGN_LEFT_MID, 104, 0);
         }
 
         /* 行 */
@@ -874,11 +939,8 @@ static void set_ui_create(lv_obj_t *root)
         }
 
         {
-            /* 键名用 14px 比例字（montserrat_14）—— 尺寸优先的选择。
-               注意：1bit 的 I1 面板会把抗锯齿字按覆盖率阈值切一刀，选中反白
-               （白字黑底）时白色笔画偏细；点阵字只有 8/16 两档（8 太小、16 太大），
-               所以这里接受"反白略细"换尺寸。 */
-            lv_obj_t *k = set_label(row, &lv_font_montserrat_14, lv_color_black(), r->key);
+            /* 原版 29px 行高与行位置不变；中文字使用等尺寸字库。 */
+            lv_obj_t *k = set_label(row, &ui_font_14, lv_color_black(), app_text(r->key, ROW_KEYS_EN[i]));
 
             lv_obj_align(k, LV_ALIGN_LEFT_MID, 14, 0);
             m_row_key[i] = k;   // 选中行整行反白时，键名要跟着变白
@@ -906,7 +968,7 @@ static void set_ui_create(lv_obj_t *root)
             lv_obj_align(fill, LV_ALIGN_LEFT_MID, 0, 0);
             m_row_fill[i] = fill;
 
-            m_row_val[i] = set_label(row, &lv_font_unscii_8, lv_color_black(), "");
+            m_row_val[i] = set_label(row, &ui_font_14, lv_color_black(), "");
             lv_obj_align(m_row_val[i], LV_ALIGN_RIGHT_MID, 0, 0);
         }
         else if(r->kind == SET_KIND_TOGGLE)
@@ -922,21 +984,24 @@ static void set_ui_create(lv_obj_t *root)
             lv_obj_align(tog, LV_ALIGN_RIGHT_MID, 0, 0);
             m_row_tog[i] = tog;
 
-            t = set_label(tog, &lv_font_unscii_8, lv_color_black(), "ON");
+            t = set_label(tog, &ui_font_14, lv_color_black(), "开");
             lv_obj_center(t);
             m_row_val[i] = t;
 
             /* 开关行左侧的状态文案（WiFi / 蓝牙：状态 + 开关同一行） */
             if(ROWS[i].field == F_WIFI_ON || ROWS[i].field == F_BT_ON)
             {
-                lv_obj_t *st = set_label(row, &lv_font_unscii_8, lv_color_black(), "");
+                lv_obj_t *st = set_label(row, &ui_font_14, lv_color_black(), "");
                 lv_obj_align(st, LV_ALIGN_RIGHT_MID, -48, 0);
                 m_row_st[i] = st;   // 文字与颜色由 set_apply 按快照刷新
             }
         }
         else
         {
-            m_row_val[i] = set_label(row, &lv_font_unscii_8, lv_color_black(), "");
+            m_row_val[i] = set_label(row, &ui_font_14, lv_color_black(), "");
+            lv_obj_set_width(m_row_val[i], 220);
+            lv_label_set_long_mode(m_row_val[i], LV_LABEL_LONG_DOT);
+            lv_obj_set_style_text_align(m_row_val[i], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
             lv_obj_align(m_row_val[i], LV_ALIGN_RIGHT_MID, 0, 0);
         }
     }
@@ -963,6 +1028,8 @@ static void set_ui_destroy(void)
     memset(m_row_ptr, 0, sizeof(m_row_ptr));
     memset(m_row_st, 0, sizeof(m_row_st));
     m_row_idx_label = NULL;
+    m_head_label = NULL;
+    memset(m_sec_label, 0, sizeof(m_sec_label));
     /* 释放外壳：顺带删周期定时器（它不在对象树里，不删会变野指针） */
     app_shell_release(&m_shell);
     sys_logi(APP_SET_TAG, "destroy settings page");

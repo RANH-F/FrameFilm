@@ -54,13 +54,14 @@ typedef void (*app_shell_tick_cb_t)(void);
  * @brief 状态栏里需要动态刷新的控件
  */
 typedef struct {
-    lv_obj_t *bat_label;    // "BAT 82%"
-    lv_obj_t *bat_pip;      // 电量指示块（低于 20% 留空）
+    lv_obj_t *bat_label;    // "82%"，位于状态栏最右侧
     lv_obj_t *wifi_label;   // "WIFI"（关闭时整项隐藏）
     lv_obj_t *wifi_pip;
     lv_obj_t *bt_label;     // "BT"
     lv_obj_t *bt_pip;
     lv_obj_t *time_label;   // 居中 "HH:MM"（由 tick 维护）
+    lv_obj_t *hint_label;
+    lv_obj_t *page_label;
 
     /* ---- 以下为内部状态，页面不要写 ---- */
     app_status_t last_status;   // 上次已上屏的数据（用于变更检测，避免无谓全帧刷新）
@@ -86,6 +87,7 @@ typedef struct {
  * @param out  输出：状态栏里需要动态刷新的控件（可为 NULL）
  */
 void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_shell_t *out);
+void app_shell_set_text(app_shell_t *s, const char *hint, const char *page);
 
 /**
  * @brief 请求刷新状态栏数据（页面 create 时调用一次即可）
@@ -116,6 +118,9 @@ void app_shell_start_tick(app_shell_t *s, app_shell_tick_cb_t cb);
  * 控件上的野指针定时器。
  */
 void app_shell_release(app_shell_t *s);
+/* 共用 logo + 10% 概率彩蛋，仅 ui_task 使用。 */
+#define APP_SHELL_BRAND_H 304
+lv_obj_t *app_shell_brandmark(lv_obj_t *parent);
 
 /**
  * @brief 把状态栏数据落到控件（页面 on_msg 里调用）
