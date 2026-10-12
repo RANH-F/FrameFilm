@@ -738,8 +738,8 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         }
         case BLE_FILM_TRANS_CH_FILE_NAME :
         {
-            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0 &&
-               cmd->len < sizeof(m_film_trans_filename))
+            /* m_film_trans_filename 为 256B，cmd->len 是 uint8_t（≤255），加 NUL 必然放得下 */
+            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0)
             {
                 memcpy(m_film_trans_filename, cmd->pdata, cmd->len);
                 m_film_trans_filename[cmd->len] = '\0';

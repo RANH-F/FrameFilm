@@ -183,6 +183,7 @@ static void service_param_set_default(void)
 
     // BLE参数重置
     g_service_param.ble.ble_enable = 1; // BLE默认开启
+    memset(g_service_param.ble.ble_name, 0, sizeof(g_service_param.ble.ble_name)); // 空 = 未配置，用蓝牙 MAC 派生
 }
 
 /**
