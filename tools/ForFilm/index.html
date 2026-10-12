@@ -1163,7 +1163,7 @@
                             </select>
                         </label>
                         <label class="fw-option"><input type="checkbox" id="fw-erase-all"> 先整片擦除</label>
-                        <label class="fw-option"><input type="checkbox" id="fw-merged-image" onchange="fwRenderFileList()"> 合并镜像（单文件，从 0x0 烧）</label>
+                        <label class="fw-option"><input type="checkbox" id="fw-merged-image" onchange="fwOnMergedToggle()"> 合并镜像（单文件，从 0x0 烧）</label>
                     </div>
                     <div class="action-controls">
                         <button class="primary-button" id="fw-flash-btn" type="button" onclick="startSerialFlash()">开始烧录</button>
@@ -1176,6 +1176,7 @@
                     <div id="fw-log" class="fw-log" style="display: none;"></div>
                     <p class="field-hint" id="fw-env-hint"></p>
                     <p class="field-hint">偏移按文件名自动匹配：<code>bootloader</code> → 0x0、<code>partition</code> → 0x8000、<code>ota_data</code> → 0x29000、其它（应用）→ 0x30000。build 目录里的那几个 .bin 直接一次全选即可。</p>
+                    <p class="field-hint">只选一个文件时会<b>按内容</b>自动识别是否合并镜像（偏移 0x8000 处有分区表魔数即判定为合并镜像），自动勾选并按 0x0 整片写入，不用看文件名。</p>
                 </div>
             </div>
         </div>

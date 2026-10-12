@@ -34,6 +34,7 @@ const FW_ADDR_RULES = [
 let fwFiles = [];       // [{ file, name, size }]
 let fwBusy = false;     // 正在烧写：禁止重入
 let fwPort = null;      // 保留最近一次选中的串口（仅用于提示）
+let fwMergedDetected = null;   // 合并镜像自动判定结果：null=未判定，true/false=已判定
 
 /* ---------------------------------------------------------------- 环境/工具 */
 
@@ -91,6 +92,21 @@ function fwSetControlsEnabled(enabled) {
 /* ------------------------------------------------------------------ 文件管理 */
 
 /**
+ * 判断一个 .bin 是不是"合并镜像"（bootloader + 分区表 + ota_data + 应用的整片镜像）。
+ *
+ * 依据**内容**而非文件名，两条同时成立才算：
+ *   1. 偏移 0 处是 ESP 镜像魔数 0xE9（bootloader 与普通应用镜像都有，只是必要条件）；
+ *   2. 偏移 0x8000 处是分区表魔数 0xAA 0x50（ESP-IDF 固定把分区表放在 0x8000）。
+ * 普通 app.bin 不会恰好在 0x8000 处带分区表，bootloader.bin 又短于 0x8000，
+ * 所以这个判据既不会误判、也不会漏判。
+ */
+function fwLooksLikeMergedImage(bytes) {
+    if (!bytes || bytes.length < 0x8002) return false;
+    if (bytes[0] !== 0xe9) return false;
+    return bytes[0x8000] === 0xaa && bytes[0x8001] === 0x50;
+}
+
+/**
  * 按文件名推断写入偏移。
  * 单文件 + 勾选“合并镜像”时交给调用方置 0x0。
  */
@@ -118,6 +134,14 @@ function selectFirmwareFiles() {
     if (input) input.click();
 }
 
+/** 只读文件头（0x8002 字节）判断是否合并镜像，不整份读入 */
+function fwPeekMergedImage(file) {
+    if (!file || file.size < 0x8002) return Promise.resolve(false);
+    return file.slice(0, 0x8002).arrayBuffer().then(function (buf) {
+        return fwLooksLikeMergedImage(new Uint8Array(buf));
+    });
+}
+
 function handleFirmwareFiles(event) {
     /* 先复制 FileList 再清空 input：清空会把同一个 FileList 对象一起清掉 */
     const picked = Array.prototype.slice.call(event.target.files || []);
@@ -135,10 +159,36 @@ function handleFirmwareFiles(event) {
         return { file: f, name: f.name, size: f.size, address: fwResolveAddress(f.name) };
     });
 
-    if (fwMergedImageChecked() && fwFiles.length > 1) {
-        showMessage('“合并镜像”只能选 1 个文件，已按普通固件处理', 'warning');
-    }
+    fwRenderFileList();
 
+    /* 合并镜像按内容自动判定（多文件必然不是合并镜像），省得用户去认文件名 */
+    const cb = document.getElementById('fw-merged-image');
+    fwMergedDetected = null;
+
+    if (fwFiles.length === 1) {
+        fwPeekMergedImage(fwFiles[0].file).then(function (merged) {
+            fwMergedDetected = merged;
+            if (cb) cb.checked = merged;
+            fwLog(merged
+                ? '检测到合并镜像：0x8000 处有分区表魔数 → 从 0x0 整片写入'
+                : '普通固件：0x8000 处没有分区表，按文件名规则配偏移');
+            fwRenderFileList();
+        }).catch(function () {
+            fwMergedDetected = null;
+            fwRenderFileList();
+        });
+    } else {
+        fwMergedDetected = false;
+        if (cb) cb.checked = false;
+    }
+}
+
+/** “合并镜像”开关变更：与自动判定结果冲突时提醒（写错偏移会覆盖 bootloader） */
+function fwOnMergedToggle() {
+    const cb = document.getElementById('fw-merged-image');
+    if (cb && cb.checked && fwFiles.length === 1 && fwMergedDetected === false) {
+        showMessage('该文件看起来不是合并镜像（0x8000 处没有分区表），从 0x0 写会覆盖 bootloader，请确认', 'warning');
+    }
     fwRenderFileList();
 }
 
@@ -175,7 +225,8 @@ function fwRenderFileList() {
                 '</div>';
     });
     box.innerHTML = rows + '<div class="fw-file-total">共 ' + fwFiles.length + ' 个区 · ' +
-        fwFormatBytes(total) + '</div>';
+        fwFormatBytes(total) + (fwMergedImageChecked() && fwFiles.length === 1 ? ' · 合并镜像 → 0x0' : '') +
+        '</div>';
 }
 
 /* --------------------------------------------------------------------- MD5 */
@@ -367,8 +418,12 @@ async function startSerialFlash() {
         return '  ' + item.name + ' -> 0x' + fwAddressOf(item).toString(16);
     }).join('\n');
 
+    /* 手动勾了“合并镜像”但内容不像合并镜像：确认框里再提醒一次 */
+    const riskyMerged = fwMergedImageChecked() && fwFiles.length === 1 && fwMergedDetected === false;
+
     const tip = '即将向设备写入固件：\n\n' + plan +
         '\n\n共 ' + fwFormatBytes(totalSize) + (eraseAll ? '（先整片擦除 Flash）' : '') +
+        (riskyMerged ? '\n\n注意：该文件在 0x8000 处没有分区表，却按“合并镜像”从 0x0 写入；若不是合并镜像会覆盖 bootloader。' : '') +
         '\n\n期间请勿断开 USB、勿断电。bootloader / 分区表写坏后需要重新烧录才能恢复。\n\n继续？';
     if (!confirm(tip)) return;
 
