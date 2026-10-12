@@ -95,13 +95,6 @@ ServiceParam_Def_t g_service_param = {0};
 void service_param_init(void)
 {
     nvs_init();
-    /* 旧版 AUTO(2) 会在运行 20 秒后熄灯；保留其它已存参数，仅迁移 LED 值。 */
-    if(g_service_param.sys.led_mode == SERVICE_LED_MODE_AUTO)
-    {
-        g_service_param.sys.led_mode = SERVICE_LED_MODE_ALWAYS;
-        service_param_save();
-        sys_logi("param", "LED mode migrated: AUTO -> ALWAYS");
-    }
     service_param_ensure_device_id();
 }
 

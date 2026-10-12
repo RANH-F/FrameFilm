@@ -88,7 +88,10 @@ static const uint16_t HB_OPTS_SEC[HB_OPT_NUM] = {
 /* ---- LED 模式（下标 == 落盘值，与 service_param.h 的 SERVICE_LED_MODE_* 同序）---- */
 #define LED_OPT_NUM         (SERVICE_LED_MODE_NUM)
 static const char *const LED_OPTS[LED_OPT_NUM] = {
-    "持续呼吸", "关闭"                           // 持续呼吸 / 关闭
+    "持续呼吸", "关闭", "自动"               // 常亮 / 关闭 / 闲置自动熄灭
+};
+static const char *const LED_EN[LED_OPT_NUM] = {
+    "ALWAYS", "OFF", "AUTO"
 };
 
 /* ---- 开机行为（BOOT PAGE / START APP）----
@@ -284,7 +287,7 @@ static const char *row_text(uint8_t idx)
                                   m_snap.boot_page_sel ? "SKIP" : "SHOW");
     case F_START_APP:  return app_text(STARTAPP_OPTS[m_snap.start_app_sel % STARTAPP_OPT_NUM], START_EN[m_snap.start_app_sel % STARTAPP_OPT_NUM]);
     case F_LANGUAGE:   return m_snap.language_sel ? "English" : "简体中文";
-    case F_LED:        return app_text(LED_OPTS[m_snap.led_mode_sel % LED_OPT_NUM], m_snap.led_mode_sel ? "OFF" : "ALWAYS");
+    case F_LED:        return app_text(LED_OPTS[m_snap.led_mode_sel % LED_OPT_NUM], LED_EN[m_snap.led_mode_sel % LED_OPT_NUM]);
     case F_IMG_PLAY:   return app_text(IMG_PLAY_OPTS[m_snap.img_play_sel % IMG_PLAY_OPT_NUM], m_snap.img_play_sel ? "AUTO" : "MANUAL");
     case F_IMG_INT:    return app_text(IMG_INT_OPTS[m_snap.img_interval_sel % IMG_INT_OPT_NUM], IMG_INT_EN[m_snap.img_interval_sel % IMG_INT_OPT_NUM]);
     case F_ANIM_LOOP:  return app_text(ANIM_LOOP_OPTS[m_snap.anim_loop_sel % ANIM_LOOP_OPT_NUM], m_snap.anim_loop_sel ? "LIST" : "SINGLE");
