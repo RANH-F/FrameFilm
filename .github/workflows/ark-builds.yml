@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   android:
-    name: Flutter Android release APK (temporary debug signing)
+    name: Flutter Android release APK
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -43,22 +43,27 @@ jobs:
           cp "$RUNNER_TEMP/ci_wrapper/android/gradlew.bat" flutter_app/android/gradlew.bat
           cp "$RUNNER_TEMP/ci_wrapper/android/gradle/wrapper/gradle-wrapper.jar" flutter_app/android/gradle/wrapper/gradle-wrapper.jar
           chmod +x flutter_app/android/gradlew
-      - name: Restore stable temporary debug signing
+      - name: Restore distribution signing
         env:
-          ARK_DEBUG_KEYSTORE_BASE64: ${{ secrets.ARK_DEBUG_KEYSTORE_BASE64 }}
-          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "$ARK_DEBUG_KEYSTORE_BASE64" ]; then
-            mkdir -p "$HOME/.android"
-            printf '%s' "$ARK_DEBUG_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
-            chmod 600 "$HOME/.android/debug.keystore"
-          elif [ "$PUBLISH_RELEASE" = "true" ]; then
-            echo "::error::Set ARK_DEBUG_KEYSTORE_BASE64 to the existing app's debug keystore before publishing updates."
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "::error::Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD. Release builds never fall back to debug signing. Fork PRs do not receive signing secrets."
             exit 1
           fi
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/ark-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/ark-release.jks" >> "$GITHUB_ENV"
       - name: Build APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         working-directory: flutter_app
         shell: bash
         run: |
@@ -95,6 +100,10 @@ jobs:
           name: ark-flutter-build-logs
           path: ci-logs/
           if-no-files-found: ignore
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/ark-release.jks" flutter_app/android/key.properties
   firmware:
     name: Ark ESP32-S3 firmware
     runs-on: ubuntu-24.04

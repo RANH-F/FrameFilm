@@ -127,6 +127,7 @@ class AppUpdateController extends ChangeNotifier {
   AppUpdateState state = const AppUpdateState();
 
   bool get supported => _platform.supported;
+  bool get canCheck => !checking && !acting && !state.active;
   bool get canDownload =>
       release != null &&
       !checking &&
@@ -164,7 +165,7 @@ class AppUpdateController extends ChangeNotifier {
   }
 
   Future<void> check() async {
-    if (checking || _disposed) return;
+    if (!canCheck || _disposed) return;
     checking = true;
     message = '正在查询 GitHub Releases…';
     _changed();
@@ -196,6 +197,23 @@ class AppUpdateController extends ChangeNotifier {
     }
   }
 
+  void loadDownloadDemo() {
+    if (!preview || !canCheck || _disposed) return;
+    release = AppRelease(
+      tag: '本地演示',
+      versionName: '演示安装包',
+      versionCode: 1,
+      minSdk: 28,
+      publishedAt: DateTime(2026),
+      url: '',
+      size: 20 * 1024 * 1024,
+      sha256: '',
+    );
+    state = const AppUpdateState();
+    message = '演示安装包已准备；不会联网下载或安装真实 APK。';
+    _changed();
+  }
+
   Future<void> download() async {
     final target = release;
     if (!canDownload || target == null) return;
@@ -209,19 +227,21 @@ class AppUpdateController extends ChangeNotifier {
       );
       _changed();
       var steps = 0;
-      _demoTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) {
+      _demoTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
         steps++;
-        if (steps >= 5) {
+        if (steps >= 20) {
           timer.cancel();
-          state = const AppUpdateState(
+          state = AppUpdateState(
             phase: 'ready',
+            received: target.size,
+            total: target.size,
             message: '演示下载完成，可体验安装按钮',
             canInstall: true,
           );
         } else {
           state = AppUpdateState(
             phase: 'downloading',
-            received: target.size * steps ~/ 5,
+            received: target.size * steps ~/ 20,
             total: target.size,
             message: '演示下载中，不会保存 APK',
             canCancel: true,
@@ -248,7 +268,12 @@ class AppUpdateController extends ChangeNotifier {
     if (!state.canCancel || _disposed) return;
     if (preview) {
       _demoTimer?.cancel();
-      state = const AppUpdateState(phase: 'cancelled', message: '演示下载已取消');
+      state = AppUpdateState(
+        phase: 'cancelled',
+        received: state.received,
+        total: state.total,
+        message: '演示下载已取消，可从头重新下载',
+      );
       _changed();
       return;
     }
@@ -362,6 +387,7 @@ class _AppUpdatePanelState extends State<AppUpdatePanel>
         children: [
           Text('应用更新', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
+          const Text('在应用内下载 APK，无需打开 GitHub 页面。下载完成后，由 Android 系统确认安装。'),
           if (c.preview) const Text('演示模式：发布查询是真实数据；下载与安装仅模拟。'),
           if (!c.preview && !c.supported) const Text('网页版仅可查询正式发布，当前安装版本未知。'),
           Text(
@@ -378,24 +404,33 @@ class _AppUpdatePanelState extends State<AppUpdatePanel>
           if (c.message.isNotEmpty) Text(c.message),
           if (c.state.message.isNotEmpty) Text(c.state.message),
           if (c.state.active) LinearProgressIndicator(value: c.state.progress),
-          if (c.state.total > 0 && c.state.active)
-            Text('${c.state.received} / ${c.state.total} 字节'),
+          if (c.state.total > 0)
+            Text(
+              '${((c.state.progress ?? 0) * 100).toStringAsFixed(0)}% · '
+              '${(c.state.received / 1048576).toStringAsFixed(1)} / '
+              '${(c.state.total / 1048576).toStringAsFixed(1)} MiB',
+            ),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
               OutlinedButton(
-                onPressed: c.checking ? null : c.check,
+                onPressed: c.canCheck ? c.check : null,
                 child: Text(c.checking ? '查询中…' : '检查更新'),
               ),
+              if (c.preview)
+                OutlinedButton(
+                  onPressed: c.canCheck ? c.loadDownloadDemo : null,
+                  child: const Text('体验下载流程'),
+                ),
               if (c.canDownload)
                 FilledButton(
                   onPressed: c.download,
                   child: Text(
                     c.state.phase == 'error' || c.state.phase == 'cancelled'
                         ? '重新下载'
-                        : '下载更新',
+                        : '应用内下载更新',
                   ),
                 ),
               if (c.state.canCancel)

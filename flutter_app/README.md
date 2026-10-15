@@ -35,7 +35,7 @@ Flutter 共用界面、Android BLE 桥接与 film / 固件 Wi-Fi Direct 传输�
 
 ## 工具链与命令
 
-本轮使用 Flutter stable 3.47.6 / Dart 3.13.5。Android compile/target SDK 35、minSDK 28（Android 9）、JVM 17；Release 包名 `org.framefilm.ark.flutter`；显式 debug 构建包名 `org.framefilm.ark.flutter.dev`。APK 使用 Release/AOT 编译，暂时仍用 debug 签名，不生成发行密钥。
+本轮使用 Flutter stable 3.47.6 / Dart 3.13.5。Android compile/target SDK 35、minSDK 28（Android 9）、JVM 17；Release 包名 `org.framefilm.ark.flutter`；显式 debug 构建包名 `org.framefilm.ark.flutter.dev`。Release/AOT APK 使用独立发行签名，本机配置在 `D:\FrameFilm-signing\key.properties`，可通过 `FRAMEFILM_SIGNING_PROPERTIES` 覆盖路径。密钥与密码不进入代码仓库，需安全备份；本机和 GitHub Actions 使用同一密钥。旧 debug 签名正式包无法直接覆盖升级，开发包可并行保留。配置方式见 [自动构建说明](../docs/development/ci-builds.md)。
 
 本机大型依赖与构建目录已经迁到 D 盘，原 C 盘入口保留 Windows 目录联接（junction）。没有更改系统 PATH，也没有迁移整个 `.codex/worktrees`：其他工作树仍有正在运行的程序和未提交内容。
 
@@ -230,4 +230,10 @@ SZ 使用计算时间片控制让出，避免每 32 像素强制 timer 导致 We
 - 连接信息显示在连接页；设置页依次容纳设备文件、设备设置、遥控、固件升级、界面主题、App 更新与关于；关于位于最底。关于页署名 App 开发维护 · Rafael-ban，提供 [作者 GitHub 主页](https://github.com/Rafael-ban)、[项目源码](https://github.com/Rafael-ban/FrameFilm)、反馈入口和 GPL-3.0 许可展示。
 - 设置 → 应用更新从公开 GitHub Releases 最近 20 个正式发布中查找精确的 `framefilm-ark-flutter.apk` 与 `framefilm-ark-flutter.json`。元数据记录 APK 包名、versionName、versionCode、最低系统版本、大小和 SHA-256；用 Android 当前安装包的 `versionCode` 判断是否有新版本，固件升级仍按实际 ELF 指纹判断。Web 仅查询，演示设备模式只模拟下载和安装。
 - Android 更新流程显示下载字节进度，支持取消和失败后重新下载；下载后核对大小、SHA-256、APK 包名、系统版本、versionCode 与现有 App 签名，再由用户打开 Android 系统安装器确认安装。需要安装未知应用权限时跳转系统设置，返回后可继续。下载包暂存在 App 缓存，清除未完成临时文件；已准备好的兼容包可在下次启动恢复。安装是否完成仍以系统结果为准。
-- CI 手动发布须先配置 `ARK_DEBUG_KEYSTORE_BASE64`，使用与现有 App 相同的临时 debug 签名；缺少该 Secret 时发布构建失败。此次改动尚未推送、运行远端 CI、发布 Release、编译新增原生更新代码或安装验证。此前 C7 的算法、动画、设备文件与主题检查仍按上方矩阵的验证边界理解，不代表全部 UI 逐像素一致。
+- CI 手动发布须先配置 `ARK_DEBUG_KEYSTORE_BASE64`，使用与现有 App 相同的临时 debug 签名；缺少该 Secret 时发布构建失败。提交 `4fa8e77` 已推送，[Actions #37910525382](https://github.com/Rafael-ban/FrameFilm/actions/runs/37910525382) 的 APK 与 Ark 固件构建均通过；APK 为 0.4.0+4，最低 Android 9，59,475,012 字节。此次未发布 Release，App 内覆盖安装尚未验收。此前 C7 的算法、动画、设备文件与主题检查仍按上方矩阵的验证边界理解，不代表全部 UI 逐像素一致。
+
+## 应用内下载入口（2026-10-16）
+
+设置 → 应用更新 → 检查更新 → 应用内下载更新 → 打开系统安装器。Android 复用已有 AppUpdateManager 下载 APK，无需跳转 GitHub 网页；下载显示百分比与 MiB，支持取消及从头重试。下载/校验期间暂停检查更新，防止界面上的发布信息与当前下载任务混淆。
+
+Web `?preview=1` 的“体验下载流程”提供明确标注的本地演示安装包，可在没有正式 Release 时检查进度、取消、重试、准备安装界面；不会进行真实 APK 下载或安装。真实更新仍须仓库 Release 提供 APK 与 JSON 元数据，且安装包签名与当前 App 兼容。Android 系统安装确认不能由网页模拟验收代替。

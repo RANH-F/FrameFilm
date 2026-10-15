@@ -16,7 +16,11 @@
 
 产物 `ark-flutter-release-apk` 包含构建原件 `app-release.apk`，以及用于 GitHub Release 的精确命名附件 `framefilm-ark-flutter.apk`、`framefilm-ark-flutter.json`。JSON 记录包名、versionName、versionCode、最低 Android 版本、APK 大小和 SHA-256；上传前检查 `libapp.so` 与 `libflutter.so` 存在且没有 debug 的 `kernel_blob.bin`。日志位于 `ark-flutter-build-logs`。
 
-Release/AOT APK 暂用 Android debug 签名。普通构建未配置密钥时可使用 CI 临时 debug keystore，但手动勾选发布前，必须把现有 App 对应 debug keystore 的 Base64 设为仓库 Secret `ARK_DEBUG_KEYSTORE_BASE64`；缺少此 Secret 时 Android job 明确失败，不会发布签名不兼容的更新包。此密钥仅作为当前临时签名的稳定来源，正式发行密钥仍待后续配置；已有其他签名或 `.dev` 包不能直接覆盖安装。
+Release/AOT APK 使用独立发行密钥，缺少配置时不会回退到 debug 签名。按 [Component_Manager 的发行工作流](https://github.com/Rafael-ban/Component_Manager/blob/master/.github/workflows/release.yml) 配置四项仓库 Actions Secrets：`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。工作流在 runner 临时目录恢复 keystore，将路径及签名参数交给 Gradle，结束后删除临时密钥。Fork PR 无法访问这些 Secrets，因此不能完成发行签名 job。
+
+本机密钥与私有 `key.properties` 保存在 `D:\FrameFilm-signing`，不提交到仓库。`flutter_app/tool/flutter.ps1` 默认引用此配置；其他环境可设置 `FRAMEFILM_SIGNING_PROPERTIES`，或使用 `ANDROID_KEYSTORE_PATH` 与上述三个密码/别名环境变量。请将整个签名目录另行安全备份，后续更新必须继续使用同一密钥。旧 debug 签名的正式包不能被新发行签名直接覆盖；`.dev` 开发包可继续并行保留，迁移前需备份旧 App 本地资料。
+
+2026-10-16 本机 Release 构建和 APK 签名验证通过，最终 APK 为 59,802,980 字节，证书 SHA-256：`e5c1b5305670858656fce38cea82614838992aa3326ef3166546af4f9da7245e`。用户授权后，以上四项 Secrets 已加密上传到 `Rafael-ban/FrameFilm`，并回查各项元数据确认存在。这不代表新工作流已经在云端运行或已完成手机安装验收。
 
 ## Ark 固件
 
@@ -47,8 +51,8 @@ Release/AOT APK 暂用 Android debug 签名。普通构建未配置密钥时可�
 - `3.2.5` 不参与发布选择或升级判断。文件摘要用于下载完整性，实际 ELF SHA256 用于同构建跳过及重启后确认。
 - 客户端无登录查询公开 Releases；只下载后校验导入，不自动刷机。若 GitHub 资产 digest 存在则同时核对；未提供时仍检查应用镜像自身完整性、ESP32-S3和Ark项目身份。
 
-2026-10-09 本轮 App 更新附件与固定临时 debug 签名要求仅完成本地配置；未推送、未触发本轮远端 CI、未发布 Release，也未编译本轮新增的 Android 原生更新代码。2026-10-08 公开 API 实测 HTTP 200，列表为空；这项历史查询不代表当前线上发布状态。发布与覆盖安装能力尚待远端及设备验证。
+2026-10-09 已推送提交 `4fa8e77`，[Actions #37910525382](https://github.com/Rafael-ban/FrameFilm/actions/runs/37910525382) 的 Android APK 与 Ark 固件 job 均成功，包含新增 Android 原生更新代码、AOT 资源检查和 APK 元数据生成。此次为普通 push，Release job 按预期跳过；公开发布与 App 内覆盖安装仍需单独验收。
 
 参考：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases)、[gh release create](https://cli.github.com/manual/gh_release_create)。
 
-2026-10-09：本机 arm64 Release 构建与 AOT 资源检查通过；CI 的 Release 模式修改仅保存在本地，尚未推送或运行远端验证。
+该次 CI APK 为 `0.4.0+4`，59,475,012 字节，最低 API 28，包含 arm64-v8a / armeabi-v7a / x86_64。下载后 SHA256 与 JSON 元数据一致：`1afd4547b5106d436599b7e59a13ffb93f1725f573a0007331062998ece3c13b`。本地路径为 `D:/dev-tool/FrameFilm-build/ci/37910525382/extracted/app-release/framefilm-ark-flutter.apk`。本轮本机构建因工具审批超时未执行，交付的是 CI 产物。
