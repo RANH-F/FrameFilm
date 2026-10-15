@@ -13,13 +13,22 @@ extension type _Storage(JSObject _) implements JSObject {
 @JS('document.createElement')
 external _Input _create(String tag);
 
+@JS('document.body')
+external _Body get _body;
+
+extension type _Body(JSObject _) implements JSObject {
+  external void appendChild(_Input input);
+}
+
 extension type _Input(JSObject _) implements JSObject {
   external set type(String value);
   external set accept(String value);
+  external set hidden(bool value);
   external set onchange(JSFunction value);
   external set oncancel(JSFunction value);
   external _Files? get files;
   external void click();
+  external void remove();
 }
 
 extension type _Files(JSObject _) implements JSObject {
@@ -41,10 +50,15 @@ Future<Uint8List?> pickPassportAvatar() {
   final input = _create('input');
   input.type = 'file';
   input.accept = 'image/*';
+  // Keep the chooser's input attached until selection finishes. Detached
+  // inputs can lose their browser node while the native chooser is open.
+  input.hidden = true;
+  _body.appendChild(input);
   input.oncancel = (() {
     if (!result.isCompleted) result.complete(null);
   }).toJS;
   input.onchange = (() {
+    if (result.isCompleted) return;
     final file = input.files?.item(0);
     if (file == null) {
       result.complete(null);
@@ -59,6 +73,10 @@ Future<Uint8List?> pickPassportAvatar() {
       onError: result.completeError,
     );
   }).toJS;
-  input.click();
-  return result.future;
+  try {
+    input.click();
+  } catch (error, stack) {
+    result.completeError(error, stack);
+  }
+  return result.future.whenComplete(() => input.remove());
 }
