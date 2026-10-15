@@ -393,8 +393,24 @@ class DeviceController extends ChangeNotifier {
     if (gateway.supported) {
       _subscription = gateway.snapshots.listen(
         (value) {
+          if (_disposed) return;
+          final wasConnected = snapshot.connected;
           snapshot = value.retainingTransfer(snapshot);
+          if (snapshot.connected != wasConnected) {
+            _connectionSession++;
+            automaticFilesPending = snapshot.connected;
+            automaticFilesLoading = false;
+            automaticFilesFailed = false;
+            _automaticFilesInitialized = false;
+          }
+          // Android announces the connection before starting its settings read.
+          // Wait for that initialization, or an already initialized snapshot.
+          _automaticFilesInitialized =
+              _automaticFilesInitialized ||
+              snapshot.settingsBusy ||
+              ((snapshot.width ?? 0) > 0 && (snapshot.height ?? 0) > 0);
           notifyListeners();
+          _scheduleAutomaticFiles();
         },
         onError: (Object error) {
           errorMessage = '蓝牙状态读取失败：$error';
@@ -410,7 +426,34 @@ class DeviceController extends ChangeNotifier {
   String? errorMessage;
   bool busy = false;
   bool _disposed = false;
+  int _connectionSession = 0;
+  bool _automaticFilesScheduled = false;
+  bool _automaticFilesInitialized = false;
+  bool automaticFilesPending = false;
+  bool automaticFilesLoading = false;
+  bool automaticFilesFailed = false;
   StreamSubscription<DeviceSnapshot>? _subscription;
+
+  void _scheduleAutomaticFiles() {
+    if (_disposed || _automaticFilesScheduled || !automaticFilesPending) return;
+    _automaticFilesScheduled = true;
+    scheduleMicrotask(() async {
+      _automaticFilesScheduled = false;
+      if (_disposed ||
+          !automaticFilesPending ||
+          !_automaticFilesInitialized ||
+          !canEditSettings)
+        return;
+      final session = _connectionSession;
+      automaticFilesPending = false;
+      automaticFilesLoading = true;
+      await command('listDeviceFiles');
+      if (_disposed || session != _connectionSession) return;
+      automaticFilesLoading = false;
+      automaticFilesFailed = snapshot.files['loaded'] != true;
+      notifyListeners();
+    });
+  }
 
   bool get canImportFilm =>
       gateway.supported &&
@@ -436,6 +479,7 @@ class DeviceController extends ChangeNotifier {
       (!snapshot.transfer.canRetry || snapshot.transfer.cleanupCompleted);
 
   Future<void> command(String method, [Map<String, Object?>? arguments]) async {
+    if (_disposed) return;
     if (method == 'importGeneratedFilm' && !canImportFilm) return;
     if (deviceSettingsMethods.contains(method) && !canEditSettings) return;
     final cancellingPassport = method == 'cancelPassport';
@@ -516,6 +560,10 @@ class DeviceController extends ChangeNotifier {
         !snapshot.transfer.canCancel) {
       return;
     }
+    if (method == 'listDeviceFiles') {
+      automaticFilesPending = false;
+      automaticFilesFailed = false;
+    }
     if (!cancelling) busy = true;
     errorMessage = null;
     notifyListeners();
@@ -526,6 +574,7 @@ class DeviceController extends ChangeNotifier {
     } finally {
       if (!cancelling) busy = false;
       if (!_disposed) notifyListeners();
+      _scheduleAutomaticFiles();
     }
   }
 
