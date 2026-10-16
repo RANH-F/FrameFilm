@@ -438,6 +438,11 @@ static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *re
         total = (uint32_t)length;
         *total_out = total;
         wifi_direct_status(WIFI_DIRECT_DOWNLOADING, 0, 0, total);
+        /* SDMMC needs an internal DMA bounce buffer even when file data lives in PSRAM. */
+        sys_logi(WIFI_SERVICE_TAG, "Direct download: kind=%s total=%" PRIu32
+                 " DMA free=%u largest=%u", args->file ? "file" : "film", total,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 
         if(args->file)
         {
