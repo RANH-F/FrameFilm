@@ -253,13 +253,20 @@ class PreviewDeviceGateway implements DeviceGateway {
         if (bytes.length < 32) throw ArgumentError('film 文件头不完整');
         final header = ByteData.sublistView(bytes);
         final format = bytes[9];
-        final body = format == 0
-            ? 172800
+        final width = header.getUint16(6, Endian.little);
+        final height = header.getUint16(4, Endian.little);
+        final frameCount = header.getUint16(10, Endian.little);
+        final frameBody = format == 0
+            ? width * height ~/ 2
             : format == 1
-            ? 43200
+            ? width * height ~/ 8
+            : format == 2 || format == 3
+            ? width * height
             : -1;
-        if (header.getUint16(4, Endian.little) != 720 ||
-            header.getUint16(6, Endian.little) != 480 ||
+        final body = frameBody * (frameCount > 1 ? frameCount : 1);
+        if (height != 720 ||
+            width != 480 ||
+            frameBody < 0 ||
             header.getUint32(0, Endian.little) != body ||
             bytes.length != body + 32) {
           throw ArgumentError('生成的 film 格式无效');

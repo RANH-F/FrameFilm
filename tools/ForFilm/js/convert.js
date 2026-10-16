@@ -1687,6 +1687,61 @@ var CF_PALETTE_QUAL = [
     [0, 0, 0], [0, 0, 0], [0, 0, 0], [243, 214, 7]
 ];
 
+// 实测 ColorQual 调色板：epd-color-lab（GPL-3.0）导出的 64 个物理索引，
+// 原始数据：https://github.com/mad462/epd-color-lab/tree/main/host/act
+// 48-color-qual.act / 48-color-qual-c025.act；接入说明见 docs/film/measured-color.md。
+// 原有 CF_PALETTE_QUAL 保持不变。
+// 无效索引仍保留在数组中，候选索引沿用 rgb_qual 表的 52 个有效项。
+var CF_PALETTE_QUAL_MEASURED = [
+    [0, 0, 0], [0, 0, 0], [0, 0, 0], [69, 73, 81],
+    [73, 76, 84], [80, 81, 85], [84, 81, 80], [105, 94, 82],
+    [72, 112, 147], [119, 147, 163], [148, 165, 171], [162, 173, 174],
+    [255, 255, 255], [255, 255, 255], [255, 255, 255], [171, 179, 171],
+    [65, 85, 114], [67, 94, 126], [67, 97, 131], [67, 97, 131],
+    [66, 118, 191], [101, 126, 147], [133, 166, 190], [181, 196, 193],
+    [59, 98, 123], [67, 109, 124], [67, 111, 130], [67, 111, 130],
+    [74, 118, 135], [86, 126, 134], [104, 137, 131], [124, 148, 128],
+    [106, 70, 74], [124, 70, 73], [128, 70, 73], [128, 70, 73],
+    [138, 76, 77], [143, 80, 78], [147, 82, 78], [156, 93, 78],
+    [80, 75, 86], [86, 78, 88], [86, 78, 88], [86, 78, 88],
+    [105, 86, 94], [120, 92, 98], [131, 101, 102], [147, 118, 112],
+    [67, 98, 87], [88, 116, 81], [98, 122, 80], [105, 127, 79],
+    [112, 131, 79], [117, 135, 78], [130, 143, 76], [145, 151, 74],
+    [88, 93, 87], [139, 138, 75], [162, 152, 71], [180, 165, 67],
+    [0, 0, 0], [0, 0, 0], [0, 0, 0], [180, 165, 67]
+];
+
+var CF_PALETTE_QUAL_CALIBRATED = [
+    [0, 0, 0], [0, 0, 0], [0, 0, 0], [52, 58, 68],
+    [58, 61, 71], [66, 68, 73], [71, 68, 66], [96, 83, 69],
+    [56, 104, 141], [111, 141, 158], [142, 160, 166], [157, 168, 169],
+    [252, 252, 252], [252, 252, 252], [252, 252, 252], [166, 174, 166],
+    [46, 73, 106], [49, 83, 119], [49, 87, 124], [49, 87, 124],
+    [48, 110, 187], [91, 119, 141], [126, 161, 186], [177, 192, 189],
+    [37, 88, 116], [49, 100, 117], [49, 102, 123], [49, 102, 123],
+    [59, 110, 128], [74, 119, 127], [95, 131, 124], [117, 142, 121],
+    [97, 54, 59], [117, 54, 58], [121, 54, 58], [121, 54, 58],
+    [132, 61, 63], [137, 66, 64], [141, 69, 64], [151, 82, 64],
+    [66, 60, 74], [74, 64, 76], [74, 64, 76], [74, 64, 76],
+    [96, 74, 83], [112, 81, 88], [124, 91, 92], [141, 110, 104],
+    [49, 88, 75], [76, 108, 68], [88, 114, 66], [96, 120, 65],
+    [104, 124, 65], [109, 128, 64], [123, 137, 61], [139, 145, 59],
+    [76, 82, 75], [133, 132, 60], [157, 146, 55], [175, 160, 49],
+    [0, 0, 0], [0, 0, 0], [0, 0, 0], [175, 160, 49]
+];
+
+var CF_QUAL_CANDIDATE_INDEXES = [3, 4, 5, 6, 7, 8, 9, 10, 11,
+    15, 16, 17, 18, 19, 21,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 63];
+
+// 实测方案的像素 Lab 与候选色 Lab 都使用 double 精度 sRGB 线性化。
+// 旧配置仍沿用原有 Float32 LUT，避免改变既有量化结果。
+var CF_MEASURED_SRGB_TO_LINEAR_LUT = new Float64Array(256);
+for (var cfChannel = 0; cfChannel < 256; cfChannel++) {
+    CF_MEASURED_SRGB_TO_LINEAR_LUT[cfChannel] = aeChannelToLinear(cfChannel);
+}
+
 var CF_PROFILES = {
     // ColorFast：2 相快刷，Format 0x03，rgb_fast 表标 Y 的 57 项
     colorFast55: {
@@ -1704,10 +1759,21 @@ var CF_PROFILES = {
         format: 0x02,
         label: '46 色 ColorQual（Format 0x02，3 相）',
         palette: CF_PALETTE_QUAL,
-        candidateIndexes: [3, 4, 5, 6, 7, 8, 9, 10, 11,
-            15, 16, 17, 18, 19, 21,
-            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-            41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 63]
+        candidateIndexes: CF_QUAL_CANDIDATE_INDEXES
+    },
+    colorQualMeasured: {
+        format: 0x02,
+        label: '实测校色 · 原值 ColorQual（3 相）',
+        palette: CF_PALETTE_QUAL_MEASURED,
+        candidateIndexes: CF_QUAL_CANDIDATE_INDEXES,
+        measured: true
+    },
+    colorQualCalibrated: {
+        format: 0x02,
+        label: '实测校色 · 校正2.5% ColorQual（3 相）',
+        palette: CF_PALETTE_QUAL_CALIBRATED,
+        candidateIndexes: CF_QUAL_CANDIDATE_INDEXES,
+        measured: true
     }
 };
 
@@ -1733,9 +1799,10 @@ function cfClosestIndex(r, g, b, profile) {
     var labs = profile.candidateLabs;
     var indexes = profile.candidateIndexes;
 
-    var rl = SRGB_TO_LINEAR_LUT[r] * 100.0;
-    var gl = SRGB_TO_LINEAR_LUT[g] * 100.0;
-    var bl = SRGB_TO_LINEAR_LUT[b] * 100.0;
+    var linear = profile.measured ? CF_MEASURED_SRGB_TO_LINEAR_LUT : SRGB_TO_LINEAR_LUT;
+    var rl = linear[r] * 100.0;
+    var gl = linear[g] * 100.0;
+    var bl = linear[b] * 100.0;
 
     var x = (rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375) / 95.047;
     var y = (rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750) / 100.0;
@@ -1756,7 +1823,10 @@ function cfClosestIndex(r, g, b, profile) {
         var dl = labL - pl.l;
         var da = labA - pl.a;
         var db = labB - pl.b;
-        var dist = 2.0 * dl * dl + da * da + db * db;
+        // 实测方案按 (1.2 * dL)^2；旧方案维持原来的 2 * dL^2。
+        var dist = profile.measured
+            ? (1.2 * dl) * (1.2 * dl) + da * da + db * db
+            : 2.0 * dl * dl + da * da + db * db;
         if (dist < bestDist) {
             bestDist = dist;
             best = i;
@@ -1785,11 +1855,76 @@ function cfDither(imageData, strength, profile) {
         strength);
 }
 
+// 实测方案：蛇形 Floyd-Steinberg 扩散。工作值使用浮点数，每次扩散后将邻居
+// 限制在原图该通道 ±64，避免高强度抖动把局部颜色推得过远。量化时四舍五入
+// 到整数 RGB，误差也从同一整数 RGB 计算；strength 直接取现有滑块值。
+function cfMeasuredDiffuse(work, original, offset, errR, errG, errB, factor) {
+    for (var c = 0; c < 3; c++) {
+        var delta = c === 0 ? errR : (c === 1 ? errG : errB);
+        var low = original[offset + c] - 64;
+        var high = original[offset + c] + 64;
+        work[offset + c] = Math.max(low, Math.min(high, work[offset + c] + delta * factor));
+    }
+}
+
+function cfMeasuredDither(imageData, strength, profile) {
+    var data = imageData.data;
+    var original = new Uint8Array(data);
+    var work = new Float64Array(data.length);
+    for (var i = 0; i < data.length; i += 4) {
+        work[i] = original[i];
+        work[i + 1] = original[i + 1];
+        work[i + 2] = original[i + 2];
+    }
+    var width = imageData.width;
+    var height = imageData.height;
+    var stride = width * 4;
+    for (var y = 0; y < height; y++) {
+        var reverse = (y & 1) !== 0;
+        for (var step = 0; step < width; step++) {
+            var x = reverse ? width - 1 - step : step;
+            var offset = y * stride + x * 4;
+            var r = Math.round(Math.max(0, Math.min(255, work[offset])));
+            var g = Math.round(Math.max(0, Math.min(255, work[offset + 1])));
+            var b = Math.round(Math.max(0, Math.min(255, work[offset + 2])));
+            var index = cfClosestIndex(r, g, b, profile);
+            var color = profile.palette[index];
+            var errR = (r - color[0]) * strength;
+            var errG = (g - color[1]) * strength;
+            var errB = (b - color[2]) * strength;
+            data[offset] = color[0];
+            data[offset + 1] = color[1];
+            data[offset + 2] = color[2];
+
+            var forward = reverse ? -1 : 1;
+            if (x + forward >= 0 && x + forward < width) {
+                cfMeasuredDiffuse(work, original, offset + forward * 4,
+                    errR, errG, errB, 7 / 16);
+            }
+            if (y + 1 < height) {
+                var down = offset + stride;
+                if (x - forward >= 0 && x - forward < width) {
+                    cfMeasuredDiffuse(work, original, down - forward * 4,
+                        errR, errG, errB, 3 / 16);
+                }
+                cfMeasuredDiffuse(work, original, down, errR, errG, errB, 5 / 16);
+                if (x + forward >= 0 && x + forward < width) {
+                    cfMeasuredDiffuse(work, original, down + forward * 4,
+                        errR, errG, errB, 1 / 16);
+                }
+            }
+        }
+    }
+    return imageData;
+}
+
 // 8bpp 索引色量化：useDither 为真走误差扩散，否则逐像素最近色。
 // 输出用色板实际颜色填充，后续反查索引与预览都以此为准。
 function cfQuantize(imageData, strength, useDither, profile) {
     if (useDither) {
-        return cfDither(imageData, strength, profile);
+        return profile.measured
+            ? cfMeasuredDither(imageData, strength, profile)
+            : cfDither(imageData, strength, profile);
     }
 
     var palette = profile.palette;
@@ -1922,6 +2057,8 @@ function ditherImage(imageData) {
             return bayerDither(imageData, ditherStrength);
         case 'colorFast55':
         case 'colorQual':
+        case 'colorQualMeasured':
+        case 'colorQualCalibrated':
             // 关闭抖动时退化为逐像素最近色量化，输出仍是 8bpp 索引色
             return cfQuantize(imageData, ditherStrength, isDitheringEnabled, CF_PROFILES[ditherType]);
         case 'szEnhanced':
