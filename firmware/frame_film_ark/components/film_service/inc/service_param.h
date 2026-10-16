@@ -21,8 +21,9 @@ extern "C" {
 /* ServiceParam_Def_t 布局版本：1 = 含 film 成员的旧布局；2 = 移除 film + app 参数外置；
    3 = 加入 tz_min（时区，随 BLE 0x4D 时间同步下发）；
    4 = 移除 ble_mode（"手动打开"策略从未实现，蓝牙现在只有 ble_enable 一个开关）；
-   5 = sys 分组收拢（factory_flag / tz_min 移入）+ LED 开关改三态（led_enable → led_mode） */
-#define SERVICE_PARAM_VER                                          (5)
+   5 = sys 分组收拢（factory_flag / tz_min 移入）+ LED 开关改三态（led_enable → led_mode）；
+   6 = 蓝牙名后缀并入 ble 分组（取消独立 NVS key ble_name） */
+#define SERVICE_PARAM_VER                                          (6)
 
 /* app 状态持久化：app_id 数值必须与 film_app/inc/app_interface.h 的 app_id_t 对齐
  * （service 层看不到 app_id_t，这里用裸数值常量）。
@@ -67,17 +68,22 @@ typedef struct
     char film_token[64];       // 服务端注册token（首次心跳下发，持久化避免认领后失联）
 } ServiceNetwork_Def_t;
 
+/* 蓝牙名后缀缓冲（不含 "FRAMEFILMARK-" 前缀）：1..16 字节 UTF-8 + NUL（缓冲 17B）。
+   前缀 13B + 后缀 16B = 29B，与 service_ble.h 的 BLE_DEVICE_NAME_MAX_BYTES 对齐。 */
+#define SERVICE_BLE_NAME_SUFFIX_MAX                                (16)
+
 typedef struct
 {
     uint8_t ble_enable;       // BLE开关 0：关闭 1：开启
+    char ble_name[SERVICE_BLE_NAME_SUFFIX_MAX + 1]; // 蓝牙名后缀；空串 = 未配置，由蓝牙 MAC 派生默认名
 } ServiceBle_Def_t;
 
 /* LED 模式（ServiceSys_Def_t.led_mode）。
    候选顺序即设置页候选表顺序（"LED" 行），改这里要同步 app_settings.c。 */
 #define SERVICE_LED_MODE_ALWAYS    (0)   // 常亮：一直呼吸
 #define SERVICE_LED_MODE_OFF       (1)   // 关闭：不亮
-#define SERVICE_LED_MODE_AUTO      (2)   // 旧 NVS 值，仅用于迁移到 ALWAYS，不再提供设置选项
-#define SERVICE_LED_MODE_NUM       (2)
+#define SERVICE_LED_MODE_AUTO      (2)   // 闲置自动熄灭：无操作超时后熄灯，见 service_monitor.c
+#define SERVICE_LED_MODE_NUM       (3)
 
 typedef struct
 {

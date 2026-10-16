@@ -34,6 +34,11 @@ extern "C"{
 #define BLE_NOTIFY_SEND_CH2               (2)
 #define BLE_NOTIFY_SEND_CH3               (3)
 
+/* 单条通知的字节上限（GATT 特征值长度上限，也是本地 MTU 请求值）。
+   超过它的 notify 会被 GATT 层直接丢弃（见 service_ble_gatts.c 的发送分支），
+   因此按"一帧一条通知"拼包的地方（如 0x06 文件列表）都要按它设长度上限。 */
+#define BLE_GATTS_CHAR_VAL_LEN_MAX        (200)
+
 
 /*********************************************************************
 * TYPEDEFS
@@ -141,6 +146,7 @@ extern void service_ble_gatt_server_init(void);
 extern void service_ble_gatt_server_uninit(void);
 extern void service_ble_gatt_server_reinit(void);
 extern void service_ble_gatts_dev_disconnect(void);
+
 extern void service_ble_send_notify_data(uint8_t ch, uint8_t *buf, uint16_t len);
 extern void service_ble_gatts_cmd_register_cb(service_ble_gatts_cmd_cb_t cb);
 extern uint8_t service_ble_gatts_get_connect(void);

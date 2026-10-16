@@ -711,6 +711,14 @@ static void file_list_refresh_event(void)
                     {
                         if(st.st_size >= FILM_HEADER_SIZE)
                         {
+                            /* 两趟扫描之间目录可能变（上传刚落盘 / 偶发 stat 失败），
+                               越过第一趟分配的容量就停手，否则越界写堆 */
+                            if(index >= m_file_state.file_count)
+                            {
+                                sys_logw(FILE_TAG, "file count changed during scan (%u >= %u), stop",
+                                         (unsigned)index, (unsigned)m_file_state.file_count);
+                                break;
+                            }
                             strncpy(m_file_state.file_list[index].filename, entry->d_name, sizeof(m_file_state.file_list[index].filename) - 1);
                             m_file_state.file_list[index].filename[sizeof(m_file_state.file_list[index].filename) - 1] = '\0';
                             m_file_state.file_list[index].file_size = st.st_size;
@@ -729,6 +737,10 @@ static void file_list_refresh_event(void)
             }
         }
         closedir(dir);
+
+        /* 以第二趟实际填充的条数为准：不足时多出来的槽位是 malloc 未清零的垃圾，
+           留在列表里会被后续 strcmp/strncpy 当字符串读到越界 */
+        m_file_state.file_count = index;
 
         sys_logi(FILE_TAG, "Found %d film files", m_file_state.file_count);
 

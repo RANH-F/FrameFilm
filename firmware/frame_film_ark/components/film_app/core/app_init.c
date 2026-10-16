@@ -164,12 +164,13 @@ void film_app_init(void)
             return;
         }
 
+        /* 8. 首个 app 的 APP_EVT_BOOT（开机自动切图 / 拉取）由 app_do_switch()
+              在启动后补投：这里只标记，开机画面路径走的是同一处投递
+              （见 app_manager_boot_mark），两条路径时序保持一致 */
+        app_manager_boot_mark();
         app_manager_switch(target);
         sys_logi(APP_INIT_TAG, "app layer init done (direct -> app %d)", (int)target);
     }
-
-    /* 8. 投递一次 BOOT 事件：首个 app 据此执行“开机自动”行为（自动切图 / 自动拉取） */
-    app_manager_notify_boot();
 }
 
 /*********************************************************************

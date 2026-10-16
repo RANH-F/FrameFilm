@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="css/ark-login.css?v=prts-4">
     <!-- 动画工坊样式（独立页） -->
     <link rel="stylesheet" href="css/animation.css">
+    <link rel="stylesheet" href="css/serial-flash.css">
     <link rel="stylesheet" href="css/ark-controls.css?v=prts-2">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1133,6 +1134,51 @@
                 </div>
                 <div class="field-hint" id="ark-theme-hint"></div>
             </div>
+
+            <!-- 串口烧录：走 Web Serial 整片写固件（等价 idf.py flash），比 BLE OTA 快且能刷 bootloader/分区表 -->
+            <div class="card" id="serial-flash-card">
+                <div class="card__title">
+                    <span class="ic-wrap ic-wrap--sun"><svg class="ic" viewBox="0 0 24 24"><use href="#i-board"/></svg></span>
+                    串口烧录 · 完整固件
+                </div>
+                <div class="action-item">
+                    <div class="action-header">
+                        <svg class="ic" viewBox="0 0 24 24"><use href="#i-upload"/></svg>
+                        <span>烧录固件文件</span>
+                    </div>
+                    <div class="switch-row__hint">用 USB 串口直接写设备 Flash（等价命令行 <code>idf.py flash</code>）：比蓝牙 OTA 快得多，且能刷 bootloader 与分区表。刷完设备会复位，需要重新连接蓝牙。</div>
+                    <input type="file" id="fw-file-input" accept=".bin" multiple style="display: none;" onchange="handleFirmwareFiles(event)">
+                    <div class="action-controls">
+                        <button class="secondary-button" id="fw-select-btn" type="button" onclick="selectFirmwareFiles()">选择固件文件</button>
+                        <button class="secondary-button" id="fw-detect-btn" type="button" onclick="detectSerialDevice()">检测串口</button>
+                        <button class="secondary-button" id="fw-clear-btn" type="button" onclick="clearFirmwareFiles()">清空</button>
+                    </div>
+                    <div id="fw-file-list" class="fw-file-list"></div>
+                    <div class="fw-options">
+                        <label class="fw-option">波特率
+                            <select id="fw-baud">
+                                <option value="115200">115200（最稳）</option>
+                                <option value="460800" selected>460800（推荐）</option>
+                                <option value="921600">921600（最快）</option>
+                            </select>
+                        </label>
+                        <label class="fw-option"><input type="checkbox" id="fw-erase-all"> 先整片擦除</label>
+                        <label class="fw-option"><input type="checkbox" id="fw-merged-image" onchange="fwOnMergedToggle()"> 合并镜像（单文件，从 0x0 烧）</label>
+                    </div>
+                    <div class="action-controls">
+                        <button class="primary-button" id="fw-flash-btn" type="button" onclick="startSerialFlash()">开始烧录</button>
+                    </div>
+                    <div id="fw-transfer-container" class="transfer-container" style="display: none;">
+                        <div id="fw-transfer-status" class="transfer-status">准备…</div>
+                        <div class="progress-bar"><div id="fw-transfer-progress-bar" class="progress-fill"></div></div>
+                        <div id="fw-transfer-progress" class="transfer-progress">0%</div>
+                    </div>
+                    <div id="fw-log" class="fw-log" style="display: none;"></div>
+                    <p class="field-hint" id="fw-env-hint"></p>
+                    <p class="field-hint">偏移按文件名自动匹配：<code>bootloader</code> → 0x0、<code>partition</code> → 0x8000、<code>ota_data</code> → 0x29000、其它（应用）→ 0x30000。build 目录里的那几个 .bin 直接一次全选即可。</p>
+                    <p class="field-hint">只选一个文件时会<b>按内容</b>自动识别是否合并镜像（偏移 0x8000 处有分区表魔数即判定为合并镜像），自动勾选并按 0x0 整片写入，不用看文件名。</p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1212,6 +1258,9 @@
 <script src="js/batch.js"></script>
 <script src="js/gif-decoder.js"></script>
 <script src="js/animation.js?v=ark-state-1"></script>
+<!-- 串口烧录：esptool-js（内嵌，官方 bundle 转经典脚本，挂 window.ESPTOOL）+ 本仓库的烧录流程 -->
+<script src="js/esptool-js.js"></script>
+<script src="js/serial-flash.js"></script>
 <script src="js/main.js"></script>
 <script src="js/ark-theme.js?v=prts-3"></script>
 <script src="js/ark-controls.js?v=ark-state-1"></script>

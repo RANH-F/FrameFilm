@@ -552,7 +552,7 @@ kbd{font:11px/1 var(--font-mono);border:1px solid #4a4d52;background:#202224;col
     <tr><td>1</td><td>主菜单长按 ENTER（约 0.8s）</td><td>长按已是<b>全局的"手动休眠"</b>语义（各 app 内长按同样睡，只是不画这张卡）；双击才是"退回主菜单"</td></tr>
     <tr><td>2</td><td>调度器切到休眠页，页面绘制这张卡</td><td>一次全帧刷新（~940ms），画面在按下期间就已换成卡</td></tr>
     <tr><td>3</td><td><b>等按键松开</b></td><td><b>关键坑</b>：唤醒源是 ENTER 所在 GPIO 的<b>电平</b>触发（<code>ext0</code>，STD/PRO 低有效、MAX 高有效）。若在"长按还按着"时就 <code>esp_deep_sleep_start()</code>，唤醒条件当场就满足，设备会立刻醒回来 —— 表现为"长按后闪一下就恢复"</td></tr>
-    <tr><td>4</td><td>按参数配好定时唤醒，进 deep sleep</td><td>沿用 <code>monitor_enter_low_power()</code> 的顺序：停心跳 → 逐个 deinit（BLE / LED / 电池 / SD / EPD / 输入）→ <code>hal_pwr_enter_sleep()</code>；<code>sleep_auto &amp;&amp; sleep_time &gt; 0</code> 时才 <code>hal_pwr_set_timer_wakeup()</code></td></tr>
+    <tr><td>4</td><td>按参数配好定时唤醒，进 deep sleep</td><td>沿用 <code>monitor_enter_low_power()</code> 的顺序：先 <code>hal_pwr_wakeup_prepare()</code> 配好唤醒源（ext0 失败则本次不睡、保持 pending 等心跳重试）→ 停心跳 → 逐个 deinit（BLE / LED / 电池 / SD / EPD / 输入）→ <code>hal_pwr_enter_sleep()</code>；<code>sleep_auto &amp;&amp; sleep_time &gt; 0</code> 时才 <code>hal_pwr_set_timer_wakeup()</code></td></tr>
     <tr><td>5</td><td>唤醒 = <b>复位重启</b> → BOOT → MENU</td><td>deep sleep 本质是复位，所以休眠页不会"退回去"，也没有返回路径</td></tr>
   </table>
 

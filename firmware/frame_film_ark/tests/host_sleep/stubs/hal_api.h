@@ -20,4 +20,5 @@ void hal_sd_deinit(void);
 void hal_epd_deinit(void);
 void hal_input_deinit(void);
 void hal_pwr_enter_sleep(void);
+bool hal_pwr_wakeup_prepare(void);
 #endif

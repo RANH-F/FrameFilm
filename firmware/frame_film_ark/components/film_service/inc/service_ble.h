@@ -9,6 +9,7 @@ extern "C"{
  * INCLUDES
  */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*********************************************************************
@@ -104,8 +105,11 @@ extern "C"{
 #define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
-#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证
 #define BLE_DIRECT_START_DATA_MAX                         (192)
+
+/* 蓝牙设备名 = 编译期前缀 "FRAMEFILMARK-" (13B) + 可配置后缀 (1..16B)，完整名上限 29B
+   （不含结尾 NUL，缓冲 30B）。后缀持久化在 ServiceBle_Def_t.ble_name（service_param.h）。 */
+#define BLE_DEVICE_NAME_MAX_BYTES                         (29)
 
 /* KEY_INJECT 的键值。与 input_press_type_t 无关：协议层不依赖 HAL 枚举，
  * 映射在 app 层完成（见 app_manager 的按键注入分支）。
@@ -214,6 +218,25 @@ extern void service_ble_send_resp(uint8_t ch, const uint8_t *data, uint8_t len);
  * @param cb 回调函数指针（NULL 取消注册）
  */
 extern void service_ble_set_app_id_get_cb(service_ble_app_id_get_cb_t cb);
+
+/**
+ * @brief 加载/刷新当前蓝牙设备名（0x54/0x55 与广播名共用）
+ *
+ * 读 g_service_param.ble.ble_name 里的后缀；未配置或存值非法时用蓝牙 MAC 派生并写回内存参数。
+ * 由 gatts 在蓝牙初始化/重初始化时调用：GATT Device Name(0x2A00) 与广播数据都在那时才建立，
+ * 所以 0x55 改名后要重启设备或关开蓝牙才会反映到广播名上。
+ */
+extern void service_ble_device_name_init(void);
+
+/** @brief 取当前完整设备名（指向静态缓冲，调用方不得释放或修改） */
+extern const char *service_ble_device_name_get(void);
+
+/**
+ * @brief 设置设备名后缀（UTF-8 + NUL，1..16 字节），校验通过后写参数并落盘
+ *
+ * @return 0 = 已保存，1 = 参数非法（当前名称与已存参数均不变）
+ */
+extern uint8_t service_ble_device_name_set(const uint8_t *suffix, size_t payload_len);
 
 
 #ifdef __cplusplus

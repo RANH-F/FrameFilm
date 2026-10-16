@@ -73,4 +73,12 @@
    设置页整页快照一次性下发）。改大后队列项随之变大，注意 ui_task 栈与队列占用。 */
 #define UI_CMD_DATA_MAX         (160)
 
+/* pause / page_exit 的应答等待上限（毫秒）
+ * ui_task 可能正阻塞在一次 flush 里，等它处理完命令即可返回。
+ * 上限必须盖住**最坏一次 flush**：进页后的首帧会顺带整屏清场（秒级，
+ * 见 ui_display.c 的清场分支），此时若等的太短就会超时放行，
+ * app_task 随即开始直绘，两个任务同时推 mono 帧会让 SPI 事务交错。
+ * 超时仍只告警不阻塞：界面操作失败姿态是"可能多刷一帧"，不是卡死。 */
+#define UI_ACK_TIMEOUT_MS       (6000)
+
 #endif /* __UI_CONF_H__ */

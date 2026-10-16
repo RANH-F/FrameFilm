@@ -40,13 +40,14 @@
 #include "esp_err.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
+#include "esp_mac.h"
 
+#include "sys_cfg.h"
 #include "sys_log.h"
 #include "sys_event.h"
 
 #include "service_ble_gatts.h"
 #include "service_ble.h"
-#include "service_ble_name.h"
 #include "service_file.h"
 #include "service_film.h"
 #include "service_ota.h"
@@ -64,6 +65,14 @@
 #define BLE_PROFILE_PATH           "/sdcard/app/pass/profile.json"
 #define BLE_PROFILE_FILE_MAX       (350000L)
 #define BLE_PROFILE_CHUNK_MAX      (128u)
+
+/* 设备名固定前缀（机型识别用，用户只能改后缀） */
+#define BLE_NAME_PREFIX            SYS_DEVICE_NAME "-"
+#define BLE_NAME_PREFIX_LEN        (sizeof(BLE_NAME_PREFIX) - 1)
+
+/* 前缀 + 后缀必须正好等于广播名上限（不含结尾 NUL），改任一处都要同步 */
+_Static_assert(BLE_NAME_PREFIX_LEN + SERVICE_BLE_NAME_SUFFIX_MAX == BLE_DEVICE_NAME_MAX_BYTES,
+               "BLE name prefix/suffix size mismatch");
 
 
 /*********************************************************************
@@ -111,6 +120,7 @@ static uint8_t m_ota_trans_state = BLE_OTA_TRANS_IDLE;
 static uint32_t m_ota_trans_file_size = 0;
 static uint32_t m_ota_trans_received = 0;
 static service_ble_app_id_get_cb_t m_app_id_get_cb = NULL;
+static char m_ble_device_name[BLE_DEVICE_NAME_MAX_BYTES + 1];
 
 
 /*********************************************************************
@@ -125,6 +135,8 @@ static void ble_task_handle(void *pvParameters);
 static uint8_t ble_checksum(uint8_t arr[], int len);
 static void ble_cmd_process(ble_cmd_t *cmd);
 static int ble_file_reset(void);
+static bool ble_name_suffix_valid(const uint8_t *bytes, size_t len);
+static const char *ble_name_suffix_or_default(void);
 
 void service_ble_transfer_disconnected(void)
 {
@@ -151,6 +163,90 @@ static int ble_file_reset(void)
     m_film_trans_received = 0;
     m_film_trans_file_size = 0;
     m_film_trans_filename[0] = '\0';
+    return 0;
+}
+
+/* ---------------- 蓝牙设备名（0x54 / 0x55） ----------------
+ * 完整名 = 编译期前缀 BLE_NAME_PREFIX + 可配置后缀；后缀持久化在
+ * g_service_param.ble.ble_name（无独立 NVS key）。仅 gatts 在蓝牙初始化/
+ * 重初始化时取当前名，故改名要重启或关开蓝牙才会反映到广播上。 */
+
+/* 后缀必须是 1..16 字节合法 UTF-8 + NUL：名字会进广播包与 GATT Device Name，
+ * 且任何 BLE 中心设备都能写 0x55，不能信客户端。 */
+static bool ble_name_suffix_valid(const uint8_t *bytes, size_t len)
+{
+    if(bytes == NULL || len <= 1 || len > SERVICE_BLE_NAME_SUFFIX_MAX + 1 || bytes[len - 1] != 0)
+        return false;
+
+    /* Validate UTF-8 scalar values and reject C0/C1 control characters. */
+    for(size_t i = 0; i + 1 < len;)
+    {
+        uint32_t cp;
+        uint8_t first = bytes[i++];
+        size_t more;
+        if(first < 0x80) { cp = first; more = 0; }
+        else if(first >= 0xC2 && first <= 0xDF) { cp = first & 0x1F; more = 1; }
+        else if(first >= 0xE0 && first <= 0xEF) { cp = first & 0x0F; more = 2; }
+        else if(first >= 0xF0 && first <= 0xF4) { cp = first & 0x07; more = 3; }
+        else return false;
+
+        if(i + more > len - 1) return false;
+        for(size_t j = 0; j < more; j++)
+        {
+            if((bytes[i] & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (bytes[i++] & 0x3F);
+        }
+        if((more == 1 && cp < 0x80) || (more == 2 && cp < 0x800) ||
+           (more == 3 && cp < 0x10000) || cp > 0x10FFFF ||
+           (cp >= 0xD800 && cp <= 0xDFFF) || cp < 0x20 ||
+           (cp >= 0x7F && cp <= 0x9F)) return false;
+    }
+    return true;
+}
+
+/* 返回有效后缀；未配置（空串）或存值非法时用蓝牙 MAC 派生并写回参数，作为默认名。 */
+static const char *ble_name_suffix_or_default(void)
+{
+    char *suffix = g_service_param.ble.ble_name;
+    size_t stored = strnlen(suffix, sizeof(g_service_param.ble.ble_name)) + 1;
+    if(ble_name_suffix_valid((const uint8_t *)suffix, stored))
+    {
+        return suffix;
+    }
+
+    if(suffix[0] != '\0')
+    {
+        sys_logw(BEL_SERVICE_TAG, "stored name invalid, fallback to MAC");
+    }
+
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_BT);
+    snprintf(suffix, sizeof(g_service_param.ble.ble_name), "%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return suffix;
+}
+
+void service_ble_device_name_init(void)
+{
+    snprintf(m_ble_device_name, sizeof(m_ble_device_name), "%s%s",
+             BLE_NAME_PREFIX, ble_name_suffix_or_default());
+}
+
+const char *service_ble_device_name_get(void)
+{
+    return m_ble_device_name;
+}
+
+uint8_t service_ble_device_name_set(const uint8_t *suffix, size_t payload_len)
+{
+    if(!ble_name_suffix_valid(suffix, payload_len)) return 1;
+
+    memcpy(g_service_param.ble.ble_name, suffix, payload_len);
+    g_service_param.ble.ble_name[payload_len - 1] = '\0'; /* 校验已保证末字节为 NUL */
+    service_param_save();
+
+    snprintf(m_ble_device_name, sizeof(m_ble_device_name), "%s%s",
+             BLE_NAME_PREFIX, g_service_param.ble.ble_name);
     return 0;
 }
 
@@ -388,26 +484,24 @@ static void ble_task_handle(void *pvParameters)
                 vPortFree(msg.pdata);
                 break;
             }
-            if( msg.len )
+            /* 最小帧 = HEAD+CH+LEN+SUM，不足连 ch/len 都解不出来 */
+            if(msg.len >= BLE_CMD_LEN_MIN && msg.pdata[0] == BLE_CMD_HEAD)
             {
-                if(msg.pdata[0] ==  BLE_CMD_HEAD)
+                uint8_t sum = ble_checksum(msg.pdata, msg.len - 1);
+                // sys_logi(BEL_SERVICE_TAG, "sum:0x%02x", sum);
+
+                if(sum == msg.pdata[msg.len - 1])
                 {
-                    uint8_t sum = ble_checksum(msg.pdata, msg.len - 1);
-                    // sys_logi(BEL_SERVICE_TAG, "sum:0x%02x", sum);
+                    ble_cmd_t cmd = {0};
 
-                    if(sum == msg.pdata[msg.len - 1])
+                    cmd.ch = msg.pdata[1];
+                    cmd.len = msg.pdata[2];
+                    if(cmd.len == msg.len - 4)
                     {
-                        ble_cmd_t cmd = {0};
-
-                        cmd.ch = msg.pdata[1];
-                        cmd.len = msg.pdata[2];
-                        if(cmd.len == msg.len - 4)
+                        cmd.pdata = msg.pdata + 3;
+                        if(cmd.pdata)
                         {
-                            cmd.pdata = msg.pdata + 3;
-                            if(cmd.pdata)
-                            {
-                                ble_cmd_process(&cmd);
-                            }
+                            ble_cmd_process(&cmd);
                         }
                     }
                 }
@@ -650,13 +744,6 @@ static void ble_cmd_process(ble_cmd_t *cmd)
 
     switch(cmd->ch)
     {
-        case BLE_FILM_TRANS_CH_CAPABILITIES_GET:
-        {
-            if(cmd->len != 0) break;
-            const uint8_t capabilities[5] = {1, 0, 0, 0, 1};
-            service_ble_send_resp(cmd->ch, capabilities, sizeof(capabilities));
-            break;
-        }
         case BLE_FILM_TRANS_CH_BUILD_INFO_GET:
         {
             if(cmd->len != 0) break;
@@ -718,13 +805,13 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             if(cmd->ch == BLE_FILM_TRANS_CH_DEVICE_NAME_GET)
                 status = cmd->len == 0 ? 0 : 1;
             else
-                status = service_ble_name_set(cmd->pdata, cmd->len);
+                status = service_ble_device_name_set(cmd->pdata, cmd->len);
 
             uint8_t response[1 + BLE_DEVICE_NAME_MAX_BYTES + 1] = {status};
             uint8_t response_len = 1;
             if(status == 0)
             {
-                const char *name = service_ble_name_get();
+                const char *name = service_ble_device_name_get();
                 size_t name_len = strlen(name) + 1;
                 memcpy(&response[1], name, name_len);
                 response_len += (uint8_t)name_len;
@@ -745,8 +832,8 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         }
         case BLE_FILM_TRANS_CH_FILE_NAME :
         {
-            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0 &&
-               cmd->len < sizeof(m_film_trans_filename))
+            /* m_film_trans_filename 为 256B，cmd->len 是 uint8_t（≤255），加 NUL 必然放得下 */
+            if(m_film_trans_state == BLE_FILM_TRANS_STARTED && cmd->len > 0)
             {
                 memcpy(m_film_trans_filename, cmd->pdata, cmd->len);
                 m_film_trans_filename[cmd->len] = '\0';
@@ -862,12 +949,16 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             uint32_t file_count = service_file_get_count();
             sys_logi(BEL_SERVICE_TAG, "File list count: %d", file_count);
 
-            uint8_t *cmd_buf = pvPortMalloc(150);
+            /* 单帧 = HEAD + CH + LEN + ID + NAME_LEN + NAME + NUL + SUM = 6 + name_len，
+               其中 name_len = strlen(name) + 1。缓冲按下发通知的长度上限分配，
+               并逐条校验帧长：文件名最长 255 字节，早先用固定 150B 缓冲且不校验长度，
+               超长名会越界写堆。 */
+            uint8_t *cmd_buf = pvPortMalloc(BLE_GATTS_CHAR_VAL_LEN_MAX);
             if(cmd_buf == NULL) break;
 
             for(uint32_t i = 0; i < file_count; i++)
             {
-                memset(cmd_buf, 0, 150);
+                memset(cmd_buf, 0, BLE_GATTS_CHAR_VAL_LEN_MAX);
 
                 char filename[256];
                 if(service_file_get_filename_safe(i, filename, sizeof(filename)) != 0)
@@ -875,20 +966,29 @@ static void ble_cmd_process(ble_cmd_t *cmd)
                     sys_logw(BEL_SERVICE_TAG, "File list changed during query, abort at index: %d", i);
                     break;
                 }
-                uint8_t name_len = strlen(filename) + 1;
+                size_t name_len = strlen(filename) + 1;
+
+                /* 帧长或 LEN 字段放不下就跳过该条：GATT 层会直接丢弃超长通知，
+                   发出去也只会是坏帧 */
+                if(name_len + 6 > BLE_GATTS_CHAR_VAL_LEN_MAX || name_len > 253)
+                {
+                    sys_logw(BEL_SERVICE_TAG, "File name too long, skip id=%u name_len=%u",
+                             (unsigned)i, (unsigned)name_len);
+                    continue;
+                }
 
                 cmd_buf[0] = BLE_CMD_HEAD;
                 cmd_buf[1] = BLE_FILM_TRANS_CH_FILE_LIST;
-                cmd_buf[2] = 2 + name_len;
+                cmd_buf[2] = (uint8_t)(2 + name_len);
                 cmd_buf[3] = i & 0xff;
-                cmd_buf[4] = name_len;
+                cmd_buf[4] = (uint8_t)name_len;
 
                 memcpy(&cmd_buf[5], filename, name_len);
 
-                uint8_t checksum = ble_checksum(cmd_buf, 5 + name_len);
+                uint8_t checksum = ble_checksum(cmd_buf, (int)(5 + name_len));
                 cmd_buf[5 + name_len] = checksum;
 
-                service_ble_send_notify_data(BLE_NOTIFY_SEND_CH1, cmd_buf, 6 + name_len);
+                service_ble_send_notify_data(BLE_NOTIFY_SEND_CH1, cmd_buf, (uint16_t)(6 + name_len));
 
                 vTaskDelay(50 / portTICK_PERIOD_MS);
             }
@@ -1091,7 +1191,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         {
             sys_logi(BEL_SERVICE_TAG, "SD card format requested");
             int ret = hal_sd_format();
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_SDRESET;
             resp_buf[2] = 1;
@@ -1129,7 +1229,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CTRL_WIFI_ENABLE_GET : // WiFi开关查询
         {
             sys_logi(BEL_SERVICE_TAG, "WiFi enable: %s", g_service_param.network.wifi_enable ? "ON" : "OFF");
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_WIFI_ENABLE_GET;
             resp_buf[2] = 1;
@@ -1250,7 +1350,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         {
             uint8_t status = service_wifi_get_connect_status();
             sys_logi(BEL_SERVICE_TAG, "WiFi connect status: %s", status ? "Connected" : "Disconnected");
-            uint8_t resp_buf[6];
+            uint8_t resp_buf[5];   /* HEAD+CH+LEN+DATA+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_WIFI_CONNECT_GET;
             resp_buf[2] = 1;
@@ -1276,7 +1376,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             wifi_download_state_t state = service_wifi_download_get_state();
             uint8_t progress = service_wifi_download_get_progress();
             sys_logi(BEL_SERVICE_TAG, "Download state: %d, progress: %d%%", state, progress);
-            uint8_t resp_buf[7];
+            uint8_t resp_buf[6];   /* HEAD+CH+LEN+DATA(2B)+SUM */
             resp_buf[0] = BLE_CMD_HEAD;
             resp_buf[1] = BLE_FILM_TRANS_CH_CTRL_FILM_DOWNLOAD_STATE;
             resp_buf[2] = 2;
