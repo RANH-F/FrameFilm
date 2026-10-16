@@ -245,13 +245,16 @@ static void pass_show_result(pass_load_result_t result)
         pass_card_t *old = m_active;
         if(next->color)
         {
+            lv_area_t area;
+            /* Resolve the final flex layout before caching the native overlay
+               position. The empty panel must not take part in this layout. */
+            lv_obj_add_flag(m_empty_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(m_card_img, LV_OBJ_FLAG_HIDDEN);
 #ifdef ARK_UI_SIMULATOR
             lv_image_set_src(m_card_img, &next->dsc);
-            lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
-            app_shell_stop_tick(&m_shell);
 #else
-            lv_area_t area;
             lv_image_set_src(m_card_img, NULL);
+#endif
             lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
             lv_obj_update_layout(m_card_img);
             lv_obj_get_coords(m_card_img, &area);
@@ -259,12 +262,15 @@ static void pass_show_result(pass_load_result_t result)
                                          PASS_PROFILE_W, PASS_PROFILE_H) != 0)
             {
                 result = PASS_LOAD_FAILED;
+#ifdef ARK_UI_SIMULATOR
+                lv_image_set_src(m_card_img, old != NULL ? &old->dsc : NULL);
+#else
+                if(old != NULL && !old->color) lv_image_set_src(m_card_img, &old->dsc);
+#endif
                 heap_caps_free(next);
                 next = NULL;
-                if(old != NULL && !old->color) lv_image_set_src(m_card_img, &old->dsc);
             }
             else app_shell_stop_tick(&m_shell);
-#endif
         }
         else
         {

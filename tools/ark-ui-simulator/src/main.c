@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "lvgl.h"
 #include "sys_cfg.h"
 #include "app_boot.h"
@@ -14,6 +15,7 @@
 #include "app_clock.h"
 #include "app_interface.h"
 #include "app_boot_cfg.h"
+#include "app_shell.h"
 #include "simulator.h"
 
 static uint8_t menu_sel;
@@ -142,12 +144,85 @@ static int save_prts_preview(lv_display_t *display, const char *dir)
     return result == 0 ? 0 : 1;
 }
 
+static int check_color_card(const char *step, int expected_calls)
+{
+    const simulator_color_card_t card = simulator_color_card();
+    const int expected_y = SHELL_BODY_TOP +
+        (720 - SHELL_BODY_TOP - SHELL_BODY_BOTTOM - 608) / 2;
+    if(card.calls == expected_calls &&
+       (expected_calls == 0 || (card.x == SHELL_BODY_PAD_X && card.y == expected_y &&
+                                card.w == 440 && card.h == 608))) {
+        fprintf(stderr, "%s: %d call(s) at (%d,%d) %dx%d\n",
+                step, card.calls, card.x, card.y, card.w, card.h);
+        return 0;
+    }
+    fprintf(stderr, "%s: expected %d centered overlay call(s), got %d at (%d,%d) %dx%d\n",
+            step, expected_calls, card.calls, card.x, card.y, card.w, card.h);
+    return 1;
+}
+
+static int check_pass_layout(lv_display_t *display, const char *preview_dir)
+{
+    char path[] = "/tmp/ark-pass-layout-XXXXXX";
+    char missing_path[sizeof(path) + 8];
+    const uint8_t header[16] = {'F', 'F', 'U', 'I', 2, 2, 0xB8, 0x01, 0x60, 0x02};
+    uint8_t row[440 / 2];
+    int fd = mkstemp(path);
+    if(fd < 0) { perror("mkstemp"); return 1; }
+    FILE *fp = fdopen(fd, "wb");
+    if(!fp) { close(fd); unlink(path); return 1; }
+    int result = fwrite(header, 1, sizeof(header), fp) != sizeof(header);
+    for(int y = 0; y < 608 && !result; y++) {
+        for(int x = 0; x < 440; x += 2) {
+            const int border = x < 3 || x >= 438 || y < 3 || y >= 605;
+            const int corner = (x < 22 || x >= 418) && (y < 22 || y >= 586);
+            const uint8_t code = border ? 0 : corner ? (y < 22 ? 3 : 5) : 1;
+            row[x / 2] = (uint8_t)((code << 4) | code);
+        }
+        result = fwrite(row, 1, sizeof(row), fp) != sizeof(row);
+    }
+    if(fclose(fp) != 0) result = 1;
+    if(result) { unlink(path); return 1; }
+
+    setenv("ARK_PASS_PROFILE", path, 1);
+    simulator_reset_color_card();
+    simulator_show(g_app_pass_entry.ui_ops, &g_app_pass_entry);
+    result |= check_color_card("first color", 1);
+    if(preview_dir != NULL) {
+        if(ensure_preview_dir(preview_dir) != 0) result = 1;
+        else result |= save_frame(display, preview_dir, "pass-color-layout");
+    }
+
+    snprintf(missing_path, sizeof(missing_path), "%s.missing", path);
+    setenv("ARK_PASS_PROFILE", missing_path, 1);
+    simulator_reset_color_card();
+    simulator_show(g_app_pass_entry.ui_ops, &g_app_pass_entry);
+    result |= check_color_card("empty", 0);
+
+    setenv("ARK_PASS_PROFILE", path, 1);
+    g_app_pass_entry.ui_ops->on_key(INPUT_PRESS_SHORT);
+    simulator_process_requests();
+    result |= check_color_card("empty to color", 1);
+
+    simulator_reset_color_card();
+    g_app_pass_entry.ui_ops->on_key(INPUT_PRESS_SHORT);
+    simulator_process_requests();
+    result |= check_color_card("color reload", 1);
+
+    simulator_show(NULL, NULL);
+    unlink(path);
+    fprintf(stderr, "pass layout %s\n", result ? "FAIL" : "PASS");
+    return result ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     lv_init();
     lv_display_t *display = lv_sdl_window_create(480, 720);
     if(!display) { fputs("LVGL SDL window failed\n", stderr); return 1; }
     lv_sdl_window_set_title(display, "FrameFilm Ark UI simulator");
+    if(argc >= 2 && argc <= 3 && strcmp(argv[1], "--pass-layout-check") == 0)
+        return check_pass_layout(display, argc == 3 ? argv[2] : NULL);
     if(argc == 3 && strcmp(argv[1], "--prts-preview") == 0) {
         return save_prts_preview(display, argv[2]);
     }
