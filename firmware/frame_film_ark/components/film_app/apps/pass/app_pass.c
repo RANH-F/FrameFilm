@@ -146,10 +146,11 @@ static pass_load_result_t pass_load_card(pass_card_t **out)
 #ifdef ARK_UI_SIMULATOR
     else
     {
-        /* LVGL RGB888 像素的内存字节序是 B,G,R。 */
+        /* ColorFast measured colors selected in ui_display.c; LVGL RGB888
+           pixel memory order is B,G,R. This is a preview, not panel calibration. */
         static const uint8_t bgr[7][3] = {
-            {0, 0, 0}, {255, 255, 255}, {0, 214, 255}, {48, 48, 226},
-            {0, 0, 0}, {207, 79, 32}, {69, 150, 23}
+            {0, 0, 0}, {255, 255, 255}, {57, 198, 219}, {32, 71, 180},
+            {0, 0, 0}, {135, 60, 21}, {112, 149, 123}
         };
         uint8_t *out_rgb = card->pixels + PASS_COLOR_BYTES;
         for(size_t i = 0; i < PASS_PROFILE_W * PASS_PROFILE_H; ++i)

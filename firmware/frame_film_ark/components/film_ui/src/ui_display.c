@@ -83,7 +83,7 @@ void ui_display_clear_color_card(void)      { }
 static lv_display_t *m_disp = NULL;
 static uint8_t *m_i1_buf = NULL;      /* LVGL I1 渲染缓冲（逻辑竖屏 UI_LOGICAL_W x UI_LOGICAL_H） */
 static uint8_t *m_mono_buf = NULL;    /* 送驱动的 mono 位图（物理横向 UI_MONO_W x UI_MONO_H） */
-static uint8_t *m_color_buf = NULL;   /* 通行证彩色页临时整屏 4bpp */
+static uint8_t *m_color_buf = NULL;   /* 通行证彩色页临时整屏 ColorFast 8bpp */
 static const uint8_t *m_card_pixels = NULL;
 static int m_card_x, m_card_y, m_card_w, m_card_h;
 
@@ -230,30 +230,31 @@ static void ui_i1_to_mono(const uint8_t *i1, uint8_t *mono)
 
 static void ui_i1_to_color(const uint8_t *i1, uint8_t *color)
 {
+    /* FFUI native six-color codes -> measured ColorFast palette indexes.
+       Selected with ForFilm cfClosestIndex() for the six RGB preview colors;
+       these are waveform indexes, NOT native codes repeated in two planes.
+       The FFUI loader rejects code 4 and codes above 6. */
+    static const uint8_t native_to_fast[7] = {0, 21, 63, 47, 0, 32, 52};
     for(int dy = 0; dy < UI_MONO_H; ++dy)
     {
-        uint8_t *dst = color + (size_t)dy * (UI_MONO_W / 2);
-        for(int dx = 0; dx < UI_MONO_W; dx += 2)
+        uint8_t *dst = color + (size_t)dy * UI_MONO_W;
+        for(int dx = 0; dx < UI_MONO_W; ++dx)
         {
-            uint8_t code[2];
-            for(int k = 0; k < 2; ++k)
-            {
-                const int px = dx + k;
+            uint8_t code;
 #if UI_ROTATE_90_CW
-                const int sx = dy, sy = UI_LOGICAL_H - 1 - px;
+            const int sx = dy, sy = UI_LOGICAL_H - 1 - dx;
 #else
-                const int sx = UI_LOGICAL_W - 1 - dy, sy = px;
+            const int sx = UI_LOGICAL_W - 1 - dy, sy = dx;
 #endif
-                const int cx = sx - m_card_x, cy = sy - m_card_y;
-                if(cx >= 0 && cy >= 0 && cx < m_card_w && cy < m_card_h)
-                {
-                    const size_t index = (size_t)cy * (size_t)m_card_w + (size_t)cx;
-                    const uint8_t packed = m_card_pixels[index >> 1];
-                    code[k] = (index & 1u) ? (packed & 0x0Fu) : (packed >> 4);
-                }
-                else code[k] = ui_i1_get_bit(i1, sx, sy) == UI_I1_BIT_BLACK ? 0 : 1;
+            const int cx = sx - m_card_x, cy = sy - m_card_y;
+            if(cx >= 0 && cy >= 0 && cx < m_card_w && cy < m_card_h)
+            {
+                const size_t index = (size_t)cy * (size_t)m_card_w + (size_t)cx;
+                const uint8_t packed = m_card_pixels[index >> 1];
+                code = (index & 1u) ? (packed & 0x0Fu) : (packed >> 4);
             }
-            dst[dx >> 1] = (uint8_t)((code[0] << 4) | code[1]);
+            else code = ui_i1_get_bit(i1, sx, sy) == UI_I1_BIT_BLACK ? 0 : 1;
+            dst[dx] = native_to_fast[code];
         }
     }
 }
@@ -294,7 +295,7 @@ static void ui_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
         {
             hal_epd_mono_session_end();
             hal_epd_display_init();
-            hal_epd_display_native_4bpp(m_color_buf);
+            hal_epd_display_8bpp_mode(m_color_buf, 0); /* ColorFast, same as Film */
             hal_epd_pwroff();
         }
         else
@@ -391,7 +392,7 @@ int ui_display_set_color_card(const uint8_t *pixels, int x, int y, int w, int h)
     if(pixels == NULL || w <= 0 || h <= 0 || m_disp == NULL) return -1;
     if(m_color_buf == NULL)
     {
-        m_color_buf = ui_display_alloc((size_t)UI_MONO_W * UI_MONO_H / 2, "color frame");
+        m_color_buf = ui_display_alloc((size_t)UI_MONO_W * UI_MONO_H, "ColorFast frame");
         if(m_color_buf == NULL) return -1;
     }
     m_card_x = x; m_card_y = y; m_card_w = w; m_card_h = h;

@@ -409,7 +409,7 @@ class _PassportEditorState extends State<PassportEditor> {
         const SizedBox(height: 8),
         Text(
           _avatarMode == 'color'
-              ? '设备六色预览 · 彩色慢刷，页面时间静态；需要支持彩色通行证的固件'
+              ? '设备六色预览 · 页面时间静态；新版固件使用 ColorFast 彩色快刷'
               : _avatarMode == 'grayscale'
               ? '设备黑白预览 · 灰度通过黑白网点表现'
               : '最终黑白预览 · 440×608',

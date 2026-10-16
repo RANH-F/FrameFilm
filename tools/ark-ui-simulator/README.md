@@ -35,7 +35,7 @@ ARK_PASS_PROFILE="$PWD/.output/ark/logs/pass-preview/profile.bin" \
   ./tools/ark-ui-simulator/build/ark-ui-simulator
 ```
 
-上例指向本机验证用样例文件；使用自己的资料时换成实际导出路径。按数字 5 打开通行证，单击 Enter 重新加载同一路径；没有配置文件时显示空状态，加载失败保留当前通行证。主体图为 440×608，支持原 1bit FFUI v1 与六色 4bpp FFUI v2，格式见 [`ark-pass-editor`](../ark-pass-editor/README.md)。模拟器将 v2 色码映射成桌面 RGB 预览；实机则在 UI 刷新时把卡片与黑白外壳合成后走面板原生 4bpp。这里不模拟蓝牙、SD 或实机电子纸刷新。
+上例指向本机验证用样例文件；使用自己的资料时换成实际导出路径。按数字 5 打开通行证，单击 Enter 重新加载同一路径；没有配置文件时显示空状态，加载失败保留当前通行证。主体图为 440×608，支持原 1bit FFUI v1 与六色 4bpp FFUI v2，格式见 [`ark-pass-editor`](../ark-pass-editor/README.md)。实机把 v2 卡片与黑白外壳合成，映射为 ColorFast 8bpp 索引后两阶段快刷；原文件格式不变。模拟器使用这些索引的标定 RGB 预览，快刷颜色与原生六色存在差异。这里不模拟蓝牙、SD 或实机电子纸刷新耗时。
 
 检查彩色通行证的 LVGL 卡片定位时，运行独立回归入口（无需 `--smoke` 或自己的资料文件）：
 
