@@ -47,6 +47,9 @@ void ui_display_release(void)               { }
 void ui_display_set_output(int enable)      { (void)enable; }
 void ui_display_invalidate_all(void)        { }
 int64_t ui_display_last_flush_us(void)      { return 0; }
+int ui_display_set_color_card(const uint8_t *pixels, int x, int y, int w, int h)
+{ (void)pixels; (void)x; (void)y; (void)w; (void)h; return -1; }
+void ui_display_clear_color_card(void)      { }
 
 #else /* SYS_UI_ENABLE */
 
@@ -80,6 +83,9 @@ int64_t ui_display_last_flush_us(void)      { return 0; }
 static lv_display_t *m_disp = NULL;
 static uint8_t *m_i1_buf = NULL;      /* LVGL I1 渲染缓冲（逻辑竖屏 UI_LOGICAL_W x UI_LOGICAL_H） */
 static uint8_t *m_mono_buf = NULL;    /* 送驱动的 mono 位图（物理横向 UI_MONO_W x UI_MONO_H） */
+static uint8_t *m_color_buf = NULL;   /* 通行证彩色页临时整屏 4bpp */
+static const uint8_t *m_card_pixels = NULL;
+static int m_card_x, m_card_y, m_card_w, m_card_h;
 
 /* 输出闸门：app_task 侧 pause/page_exit 需要"立即"生效（防止正在进行的 flush
  * 覆盖随后绘制的直绘内容），而 ui_task 侧每帧都要读，故用 volatile 避免被缓存。 */
@@ -222,6 +228,36 @@ static void ui_i1_to_mono(const uint8_t *i1, uint8_t *mono)
 #endif
 }
 
+static void ui_i1_to_color(const uint8_t *i1, uint8_t *color)
+{
+    for(int dy = 0; dy < UI_MONO_H; ++dy)
+    {
+        uint8_t *dst = color + (size_t)dy * (UI_MONO_W / 2);
+        for(int dx = 0; dx < UI_MONO_W; dx += 2)
+        {
+            uint8_t code[2];
+            for(int k = 0; k < 2; ++k)
+            {
+                const int px = dx + k;
+#if UI_ROTATE_90_CW
+                const int sx = dy, sy = UI_LOGICAL_H - 1 - px;
+#else
+                const int sx = UI_LOGICAL_W - 1 - dy, sy = px;
+#endif
+                const int cx = sx - m_card_x, cy = sy - m_card_y;
+                if(cx >= 0 && cy >= 0 && cx < m_card_w && cy < m_card_h)
+                {
+                    const size_t index = (size_t)cy * (size_t)m_card_w + (size_t)cx;
+                    const uint8_t packed = m_card_pixels[index >> 1];
+                    code[k] = (index & 1u) ? (packed & 0x0Fu) : (packed >> 4);
+                }
+                else code[k] = ui_i1_get_bit(i1, sx, sy) == UI_I1_BIT_BLACK ? 0 : 1;
+            }
+            dst[dx >> 1] = (uint8_t)((code[0] << 4) | code[1]);
+        }
+    }
+}
+
 /**
  * @brief LVGL flush 回调
  *
@@ -245,14 +281,27 @@ static void ui_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
         pal[0] = 0x00; pal[1] = 0x00; pal[2] = 0x00; pal[3] = 0xFF;   /* 索引 0：黑 */
         pal[4] = 0xFF; pal[5] = 0xFF; pal[6] = 0xFF; pal[7] = 0xFF;   /* 索引 1：白 */
 
-        ui_i1_to_mono(px_map + UI_I1_PALETTE_BYTES, m_mono_buf);
+        if(m_card_pixels != NULL)
+            ui_i1_to_color(px_map + UI_I1_PALETTE_BYTES, m_color_buf);
+        else
+            ui_i1_to_mono(px_map + UI_I1_PALETTE_BYTES, m_mono_buf);
         int64_t t1 = esp_timer_get_time();
 
         /* 打开黑白快刷会话：UI 连续刷新（进度条逐格 / 连点换页）帧间省掉
            每帧约 200ms 的 PON/POF。会话由 ui_task 在空闲一段时间后关闭
            （见 ui_core.c），页面退出时也会关，面板不会留在带电态。 */
-        hal_epd_mono_session_begin();
-        hal_epd_display_mono(m_mono_buf);
+        if(m_card_pixels != NULL)
+        {
+            hal_epd_mono_session_end();
+            hal_epd_display_init();
+            hal_epd_display_native_4bpp(m_color_buf);
+            hal_epd_pwroff();
+        }
+        else
+        {
+            hal_epd_mono_session_begin();
+            hal_epd_display_mono(m_mono_buf);
+        }
         int64_t t2 = esp_timer_get_time();
 
         /* TEMP 打点：定位 UI 一帧 ~1s 花在哪（conv = I1→mono 转置 / epd = 驱动刷屏） */
@@ -318,6 +367,7 @@ int ui_display_acquire(void)
 void ui_display_release(void)
 {
     m_output_enabled = 0;
+    ui_display_clear_color_card();
 
     if(m_disp != NULL)
     {
@@ -334,6 +384,25 @@ void ui_display_release(void)
         heap_caps_free(m_mono_buf);
         m_mono_buf = NULL;
     }
+}
+
+int ui_display_set_color_card(const uint8_t *pixels, int x, int y, int w, int h)
+{
+    if(pixels == NULL || w <= 0 || h <= 0 || m_disp == NULL) return -1;
+    if(m_color_buf == NULL)
+    {
+        m_color_buf = ui_display_alloc((size_t)UI_MONO_W * UI_MONO_H / 2, "color frame");
+        if(m_color_buf == NULL) return -1;
+    }
+    m_card_x = x; m_card_y = y; m_card_w = w; m_card_h = h;
+    m_card_pixels = pixels;
+    return 0;
+}
+
+void ui_display_clear_color_card(void)
+{
+    m_card_pixels = NULL;
+    if(m_color_buf != NULL) { heap_caps_free(m_color_buf); m_color_buf = NULL; }
 }
 
 void ui_display_set_output(int enable)

@@ -4,6 +4,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/painting.dart';
 
+import 'frame_algorithms.dart' show filmPalette;
+
 class PassportProfile {
   const PassportProfile({
     this.codename = '',
@@ -13,10 +15,12 @@ class PassportProfile {
     this.affiliation = '',
     this.signature = '',
     this.avatar,
+    this.avatarMode = 'mono',
   });
   final String codename, number, affiliation, signature;
   final bool codenameUnset, numberUnset;
   final String? avatar;
+  final String avatarMode;
 
   factory PassportProfile.fromJson(String raw) {
     if (utf8.encode(raw).length > 350000) {
@@ -44,6 +48,10 @@ class PassportProfile {
       throw const FormatException('尚未设置标记或头像类型无效');
     }
     final avatar = value['avatar'] as String?;
+    final avatarMode = value['avatarMode'] ?? 'mono';
+    if (!['mono', 'grayscale', 'color'].contains(avatarMode)) {
+      throw const FormatException('头像显示模式无效');
+    }
     if (avatar != null) {
       if (!avatar.startsWith('data:image/png;base64,') ||
           avatar.length > 300000) {
@@ -67,10 +75,11 @@ class PassportProfile {
       affiliation: value['affiliation'],
       signature: value['signature'],
       avatar: avatar,
+      avatarMode: avatarMode as String,
     );
   }
   String toJson() =>
-      '${const JsonEncoder.withIndent('  ').convert({'version': 1, 'codename': codename, 'codenameUnset': codenameUnset, 'number': number, 'numberUnset': numberUnset, 'affiliation': affiliation, 'signature': signature, 'avatar': avatar})}\n';
+      '${const JsonEncoder.withIndent('  ').convert({'version': 1, 'codename': codename, 'codenameUnset': codenameUnset, 'number': number, 'numberUnset': numberUnset, 'affiliation': affiliation, 'signature': signature, 'avatar': avatar, 'avatarMode': avatarMode})}\n';
   Uint8List? get avatarBytes =>
       avatar == null ? null : base64Decode(avatar!.substring(22));
 }
@@ -183,6 +192,59 @@ class PassportRaster {
   final Uint8List bin, png;
 }
 
+// The exact quantized pixels are shared by PNG preview and device payload.
+// Gray is spatial black/white halftone, not a native grayscale panel mode.
+Uint8List encodePassportPixels(
+  Uint8List rgba,
+  String mode, {
+  required bool hasAvatar,
+}) {
+  if (rgba.length != 440 * 608 * 4 ||
+      !['mono', 'grayscale', 'color'].contains(mode)) {
+    throw ArgumentError('通行证像素或头像模式无效');
+  }
+  final color = mode == 'color';
+  final bin = Uint8List(color ? 133776 : 33456)
+    ..setAll(0, [70, 70, 85, 73, color ? 2 : 1, color ? 2 : 1, 184, 1, 96, 2]);
+  const bayer = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  const codes = [0, 1, 2, 3, 5, 6];
+  for (var i = 0; i < 440 * 608; i++) {
+    final k = i * 4, x = i % 440, y = i ~/ 440;
+    final inAvatar = hasAvatar && x >= 20 && x < 148 && y >= 143 && y < 303;
+    final luminance = .299 * rgba[k] + .587 * rgba[k + 1] + .114 * rgba[k + 2];
+    var index = luminance < 160 ? 0 : 1;
+    if (inAvatar && color) {
+      var distance = double.infinity;
+      for (var p = 0; p < filmPalette.length; p++) {
+        final rgb = filmPalette[p];
+        final r = rgba[k] - rgb[0],
+            g = rgba[k + 1] - rgb[1],
+            b = rgba[k + 2] - rgb[2];
+        final d = .299 * r * r + .587 * g * g + .114 * b * b;
+        if (d < distance) {
+          distance = d;
+          index = p;
+        }
+      }
+    } else if (inAvatar && mode == 'grayscale') {
+      final threshold =
+          (bayer[((y - 143) & 3) * 4 + ((x - 20) & 3)] + .5) * 255 / 16;
+      index = luminance < threshold ? 0 : 1;
+    }
+    final rgb = filmPalette[index];
+    rgba[k] = rgb[0];
+    rgba[k + 1] = rgb[1];
+    rgba[k + 2] = rgb[2];
+    rgba[k + 3] = 255;
+    if (color) {
+      bin[16 + (i >> 1)] |= codes[index] << (i.isEven ? 4 : 0);
+    } else if (index == 0) {
+      bin[16 + (i >> 3)] |= 0x80 >> (i & 7);
+    }
+  }
+  return bin;
+}
+
 Future<PassportRaster> renderPassport(PassportProfile p) async {
   final avatar = await validatePassportAvatar(p);
   final recorder = ui.PictureRecorder();
@@ -288,15 +350,11 @@ Future<PassportRaster> renderPassport(PassportProfile p) async {
       .buffer
       .asUint8List();
   image.dispose();
-  final bin = Uint8List(33456)
-    ..setAll(0, [70, 70, 85, 73, 1, 1, 184, 1, 96, 2]);
-  for (var i = 0; i < 440 * 608; i++) {
-    final k = i * 4;
-    final ink = .299 * rgba[k] + .587 * rgba[k + 1] + .114 * rgba[k + 2] < 160;
-    rgba[k] = rgba[k + 1] = rgba[k + 2] = ink ? 0 : 255;
-    rgba[k + 3] = 255;
-    if (ink) bin[16 + (i >> 3)] |= 0x80 >> (i & 7);
-  }
+  final bin = encodePassportPixels(
+    rgba,
+    p.avatarMode,
+    hasAvatar: p.avatar != null,
+  );
   final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
   final descriptor = ui.ImageDescriptor.raw(
     buffer,

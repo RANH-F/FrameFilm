@@ -289,30 +289,17 @@ static int ui_cmd_send(const ui_cmd_t *c)
     return 0;
 }
 
-/**
- * @brief 等待 ui_task 确认"已停止把帧推给面板"
- *
- * 面板是 app_task（DIRECT 直绘）与 ui_task（UI flush）共享的资源，
- * 两个任务同时调 hal_epd_display_mono() 会让 SPI 事务交错、画面损坏。
- * 闸门只能挡住"尚未开始"的 flush，挡不住"正在进行"的那一次，
- * 因此关闭闸门后必须等 ui_task 给出应答：ui_task 是单线程，一旦它处理完
- * 本条命令，就保证没有任何 flush 在飞行中。
- *
- * @param timeout_ms 等待上限；超时只告警（失败姿态是"可能多刷一帧"，不是卡死）
- */
-static void ui_wait_stopped(uint32_t timeout_ms)
+/* 切页/暂停是面板独占边界。彩色 flush 可持续几十秒，固定 1s 超时
+ * 会让 app_task 在 ui_task 尚用 HAL 时直绘；队列满也不能丢停屏命令。
+ * 因此等待 ui_task 同步确认，确认后才放行调用者。 */
+static void ui_stop_and_wait(ui_cmd_id_t id)
 {
-    if(m_ack_sem == NULL)
-    {
-        return;
-    }
-
+    if(m_queue == NULL || m_ack_sem == NULL) return;
     (void)xSemaphoreTake(m_ack_sem, 0);   // 清掉可能残留的旧应答
-
-    if(xSemaphoreTake(m_ack_sem, pdMS_TO_TICKS(timeout_ms)) != pdPASS)
-    {
-        sys_logw(UI_TAG, "wait output-stopped ack timeout (%ums)", (unsigned)timeout_ms);
-    }
+    ui_cmd_t cmd = {0};
+    cmd.id = (uint8_t)id;
+    if(xQueueSend(m_queue, &cmd, portMAX_DELAY) == pdPASS)
+        (void)xSemaphoreTake(m_ack_sem, portMAX_DELAY);
 }
 
 /**
@@ -524,18 +511,11 @@ void ui_core_page_enter(uint8_t app_id, const app_ui_ops_t *ops)
 
 void ui_core_page_exit(void)
 {
-    ui_cmd_t cmd;
-
     /* 同步关闸门并等待 ui_task 停稳：随后 DIRECT 层 app 会立刻绘制面板，
        两个任务同时推 mono 帧会让 SPI 事务交错 */
     ui_display_set_output(0);
 
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.id = UI_CMD_PAGE_EXIT;
-    if(ui_cmd_send(&cmd) == 0)
-    {
-        ui_wait_stopped(UI_ACK_TIMEOUT_MS);
-    }
+    ui_stop_and_wait(UI_CMD_PAGE_EXIT);
 }
 
 int ui_core_stop_for_sleep(void)
@@ -562,17 +542,10 @@ int ui_core_stop_for_sleep(void)
 
 void ui_core_pause(void)
 {
-    ui_cmd_t cmd;
-
     /* 同上：直绘内容要立刻独占面板 */
     ui_display_set_output(0);
 
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.id = UI_CMD_PAUSE;
-    if(ui_cmd_send(&cmd) == 0)
-    {
-        ui_wait_stopped(UI_ACK_TIMEOUT_MS);
-    }
+    ui_stop_and_wait(UI_CMD_PAUSE);
 }
 
 void ui_core_resume(void)

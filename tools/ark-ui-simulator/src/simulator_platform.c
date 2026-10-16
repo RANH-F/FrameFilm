@@ -18,6 +18,7 @@
 #include "hal_bat.h"
 #include "freertos/task.h"
 #include "ui_core.h"
+#include "ui_display.h"
 #include "simulator.h"
 
 typedef struct {
@@ -92,6 +93,9 @@ int ui_core_post(uint32_t cmd, const void *data, uint8_t len)
     return 0;
 }
 int ui_core_is_ready(void) { return 1; }
+int ui_display_set_color_card(const uint8_t *pixels, int x, int y, int w, int h)
+{ (void)pixels; (void)x; (void)y; (void)w; (void)h; return -1; }
+void ui_display_clear_color_card(void) { }
 void ui_core_page_enter(uint8_t app_id, const app_ui_ops_t *ops) { (void)app_id; simulator_show(ops, NULL); }
 void ui_core_page_exit(void) { simulator_show(NULL, NULL); }
 void app_manager_sleep_show(const app_ui_ops_t *ops) { simulator_show(ops, NULL); }

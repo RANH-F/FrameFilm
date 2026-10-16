@@ -208,7 +208,9 @@ class _FrameEditorState extends State<FrameEditor> {
       c.revision++;
       c.crop = null;
       _working = false;
-      _status = '参数已更新，正在更新预览';
+      _status = c.source == null
+          ? '参数已更新，请上传图像以生成预览'
+          : '参数已更新，正在更新预览';
     });
     _previewTimer?.cancel();
     if (c.source != null) {

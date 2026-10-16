@@ -61,6 +61,10 @@ void ui_display_invalidate_all(void);
  */
 int64_t ui_display_last_flush_us(void);
 
+/* ui_task 专用。卡片像素由页面持有，remove 后方可释放。坐标为逻辑竖屏。 */
+int ui_display_set_color_card(const uint8_t *pixels, int x, int y, int w, int h);
+void ui_display_clear_color_card(void);
+
 #ifdef __cplusplus
 }
 #endif

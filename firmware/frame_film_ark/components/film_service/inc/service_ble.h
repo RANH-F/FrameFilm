@@ -104,6 +104,7 @@ extern "C"{
 #define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
+#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证
 #define BLE_DIRECT_START_DATA_MAX                         (192)
 
 /* KEY_INJECT 的键值。与 input_press_type_t 无关：协议层不依赖 HAL 枚举，

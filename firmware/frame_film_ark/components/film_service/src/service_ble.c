@@ -650,6 +650,13 @@ static void ble_cmd_process(ble_cmd_t *cmd)
 
     switch(cmd->ch)
     {
+        case BLE_FILM_TRANS_CH_CAPABILITIES_GET:
+        {
+            if(cmd->len != 0) break;
+            const uint8_t capabilities[5] = {1, 0, 0, 0, 1};
+            service_ble_send_resp(cmd->ch, capabilities, sizeof(capabilities));
+            break;
+        }
         case BLE_FILM_TRANS_CH_BUILD_INFO_GET:
         {
             if(cmd->len != 0) break;

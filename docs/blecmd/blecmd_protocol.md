@@ -6,7 +6,7 @@
 - [2. 协议框架](#2-协议框架)
 - [3. 通道定义](#3-通道定义)
 - [4. 命令详解](#4-命令详解)
-- Ark 扩展：[临时 WiFi 直传](#411-ark-临时-wifi-直传)、[通行证资料](#412-ark-通行证资料读取0x53)、[设备名称](#413-ark-设备名称0x54--0x55)、[WiFi OTA](#414-ark-wifi-ota0x560x58)
+- Ark 扩展：[临时 WiFi 直传](#411-ark-临时-wifi-直传)、[通行证资料](#412-ark-通行证资料读取0x53)、[设备名称](#413-ark-设备名称0x54--0x55)、[WiFi OTA](#414-ark-wifi-ota0x560x58)、[能力与彩色通行证](#415-ark-能力查询0x59与彩色通行证)
 - [5. 校验和计算](#5-校验和计算)
 - [6. C 语言示例](#6-c-语言示例)
 - [7. 版本历史](#7-版本历史)
@@ -302,6 +302,14 @@
 | 0x56 | BUILD_INFO_GET | 空 | 能力版本、OTA容量、实际ELF SHA256、version、project |
 | 0x57 | DIRECT_OTA_START | size(u32 BE) + 文件SHA256(32B) + SSID\0PASSWORD\0URL\0 | 0接受 / 1忙 / 2参数 / 3资源 |
 | 0x58 | DIRECT_OTA_APPLY | 空 | 0已激活 / 1非READY / 2激活失败 |
+
+### 3.15 Ark 能力查询通道（0x59）
+
+仅 `frame_film_ark` 支持，文件格式与兼容规则见 [§4.15](#415-ark-能力查询0x59与彩色通行证)。
+
+| 通道 | 名称 | 请求 | 响应 |
+|---|---|---|---|
+| 0x59 | CAPABILITIES_GET | 空 | 版本 1(u8) + flags(u32 BE)，bit0=彩色通行证 |
 
 ## 4. 命令详解
 
@@ -1458,6 +1466,12 @@ SUM  = (0x55 + 0x4E + 0x01 + 0x02) & 0xFF = 0xA6
 
 0x52共用取消；下载或READY取消均abort暂存并保持旧boot partition，清理后可以从头重试，无断点续传。apply提交点之后取消不能撤销启动分区。0x58返回0后设备延迟约1.5秒重启，为BLE应答留出发送时间；App应释放HTTP服务/GO，重连同一设备后读0x56并核对导入镜像的实际ELF SHA256，匹配才表示升级成功，不能只比较version或把断连/100%当成功。超时应显示“结果待确认”，允许重连确认。
 
+### 4.15 Ark 能力查询（0x59）与彩色通行证
+
+仅 `frame_film_ark` 实现 `CAPABILITIES_GET`：请求 LEN=0，回包 LEN=5，`capVersion=1(u8)` 后接 `flags(u32 BE)`。当前仅 bit0 (`0x00000001`) 表示支持通行证彩色 `profile.bin`；其余位保留且为零。旧固件不响应此命令，客户端应超时降级为黑白资料，不能凭用户可见版本号判断能力。
+
+通行证卡片文件仍放在 `/sdcard/app/pass/profile.bin`，文件头 16B：`FFUI`(4B)、version(1B)、format(1B)、width=440(u16 LE)、height=608(u16 LE)、保留零(6B)。原 v1/format1 的正文为 33440B、每字节 MSB 起 8 个黑白像素（1=黑）；新 v2/format2 的正文为 133760B、每字节高 nibble 为左像素，色码为黑0、白1、黄2、红3、蓝5、绿6。整文件分别为 33456B 和 133776B。彩色卡仅在 Ark UI 通行证页合成到黑白外壳，整屏走 EPD 4bpp 彩色刷新；退出页面回到原黑白 UI 路径。
+
 ## 5. 校验和计算
 
 校验和采用 **简单求和法**（Sum Check），计算公式：
@@ -1618,6 +1632,7 @@ int parse_response(uint8_t* in_buf, int in_len, uint8_t* out_ch, uint8_t* out_da
 
 | 版本 | 日期 | 描述 |
 |------|------|------|
+| 1.15 | 2026-10-15 | Ark 0x59 能力查询与通行证彩色 FFUI v2/format2；原黑白 v1 继续支持，功能以能力位判断 |
 | 1.14 | 2026-10-08 | Ark WiFi OTA 0x56~0x58：实际ELF SHA构建身份、inactive Flash流式校验、READY/apply、取消与超时；未启用boot rollback |
 | 1.13 | 2026-10-07 | Ark 3.2.5 设备名称读取/保存 0x54/0x55：UTF-8 后缀、独立 NVS、重启后广播生效 |
 | 1.12 | 2026-10-07 | Ark 通行证固定资料读取 0x53：分块读取 SD 上的 profile.json，不改变既有上传或其他固件命令 |

@@ -608,7 +608,7 @@ class _FrameQuickPageState extends State<FrameQuickPage> {
     }
   }
 
-  Widget _preview(FrameResult? result) => Column(
+  Widget _preview(FrameResult? result, {required String emptyText}) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       const Text('预览'),
@@ -626,7 +626,7 @@ class _FrameQuickPageState extends State<FrameQuickPage> {
                 ),
               ),
               child: result == null
-                  ? const Center(child: Text('请选择照片'))
+                  ? Center(child: Text(emptyText))
                   : Image.memory(result.png, fit: BoxFit.contain),
             ),
           ),
@@ -689,7 +689,7 @@ class _FrameQuickPageState extends State<FrameQuickPage> {
           ),
         Text(camera ? '拍照后自动转换为 film 并显示' : '选择后自动转换为 6 色 film 并预览'),
         const SizedBox(height: 16),
-        _preview(result),
+        _preview(result, emptyText: camera ? '请拍摄照片以生成预览' : '请选择照片'),
         const SizedBox(height: 16),
         _sendArea(result, camera ? _cameraName : _photoName),
       ],
@@ -762,7 +762,7 @@ class _FrameQuickPageState extends State<FrameQuickPage> {
               : (enabled) => c.setQuoteDither(enabled, battery: widget.battery),
         ),
         const SizedBox(height: 16),
-        _preview(c.quoteResult),
+        _preview(c.quoteResult, emptyText: '请获取一言或输入自定义内容以生成预览'),
         const SizedBox(height: 16),
         _sendArea(c.quoteResult, _quoteName),
       ],

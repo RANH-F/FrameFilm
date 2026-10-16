@@ -163,6 +163,9 @@ void hal_epd_display_green(void);
  */
 void hal_epd_display_pic(const unsigned char* picData);
 
+/* 原生面板色码 4bpp：每字节高 nibble 为左像素；仅 Ark UI 彩色合成使用。 */
+void hal_epd_display_native_4bpp(const unsigned char *pixels);
+
 /**
  * @brief 显示 .film 文件数据
  *

@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "sys_log.h"
 #include "ui_ops.h"
+#include "ui_display.h"
 #include "ui_assets.h"
 #include "ui_fonts.h"
 #include "app_shell.h"
@@ -24,6 +25,7 @@
 #define PASS_PROFILE_H        (608u)
 #define PASS_PROFILE_ROW      (PASS_PROFILE_W / 8u)
 #define PASS_PROFILE_BYTES    (PASS_PROFILE_W * PASS_PROFILE_H / 8u)
+#define PASS_COLOR_BYTES      (PASS_PROFILE_W * PASS_PROFILE_H / 2u)
 #define PASS_FFUI_HEADER      (16u)
 #define PASS_RULE_W          (240)
 #define PASS_WORD_LS         (8)
@@ -38,12 +40,14 @@ typedef enum {
 
 typedef struct {
     lv_image_dsc_t dsc;
-    uint8_t pixels[PASS_PROFILE_W * PASS_PROFILE_H];
+    uint8_t color;
+    uint8_t pixels[];
 } pass_card_t;
 
 /* pending 跨任务，exchange 明确转移所有权；active 仅 ui_task 持有。 */
 static _Atomic(pass_card_t *) m_pending = NULL;
 static atomic_int m_prepare_result = PASS_LOAD_MISSING;
+static _Atomic uint32_t m_status_bits = 0;
 static pass_card_t *m_active;
 static app_shell_t m_shell;
 static lv_obj_t *m_card_img;
@@ -66,6 +70,8 @@ static pass_load_result_t pass_load_card(pass_card_t **out)
     const char *path = pass_profile_path();
     uint8_t header[PASS_FFUI_HEADER];
     uint8_t row[PASS_PROFILE_ROW];
+    size_t payload_size;
+    uint8_t color;
     FILE *fp;
     pass_card_t *card = NULL;
     pass_load_result_t result = PASS_LOAD_FAILED;
@@ -75,39 +81,92 @@ static pass_load_result_t pass_load_card(pass_card_t **out)
     fp = fopen(path, "rb");
     if(fp == NULL) return errno == ENOENT ? PASS_LOAD_MISSING : PASS_LOAD_FAILED;
 
-    if(fseek(fp, 0, SEEK_END) != 0 ||
-       ftell(fp) != (long)(PASS_FFUI_HEADER + PASS_PROFILE_BYTES) ||
-       fseek(fp, 0, SEEK_SET) != 0 ||
-       fread(header, 1, sizeof(header), fp) != sizeof(header) ||
-       memcmp(header, "FFUI", 4) != 0 || header[4] != 1 || header[5] != 1 ||
+    if(fread(header, 1, sizeof(header), fp) != sizeof(header) ||
+       memcmp(header, "FFUI", 4) != 0 ||
+       !((header[4] == 1 && header[5] == 1) ||
+         (header[4] == 2 && header[5] == 2)) ||
        (unsigned)(header[6] | (header[7] << 8)) != PASS_PROFILE_W ||
        (unsigned)(header[8] | (header[9] << 8)) != PASS_PROFILE_H ||
        memcmp(&header[10], (const uint8_t[6]){0}, 6) != 0)
     {
         goto done;
     }
-
-    card = (pass_card_t *)heap_caps_malloc(sizeof(*card), MALLOC_CAP_SPIRAM);
-    if(card == NULL) goto done;
-
-    for(unsigned y = 0; y < PASS_PROFILE_H; ++y)
+    color = header[4] == 2;
+    payload_size = color ? PASS_COLOR_BYTES : PASS_PROFILE_BYTES;
+    if(fseek(fp, 0, SEEK_END) != 0 ||
+       ftell(fp) != (long)(PASS_FFUI_HEADER + payload_size) ||
+       fseek(fp, PASS_FFUI_HEADER, SEEK_SET) != 0)
     {
-        if(fread(row, 1, sizeof(row), fp) != sizeof(row)) goto done;
-        for(unsigned x = 0; x < PASS_PROFILE_W; ++x)
+        goto done;
+    }
+
+    card = (pass_card_t *)heap_caps_malloc(sizeof(*card) +
+             (color ? PASS_COLOR_BYTES : PASS_PROFILE_W * PASS_PROFILE_H)
+#ifdef ARK_UI_SIMULATOR
+             + (color ? PASS_PROFILE_W * PASS_PROFILE_H * 3u : 0u)
+#endif
+             , MALLOC_CAP_SPIRAM);
+    if(card == NULL) goto done;
+    card->color = color;
+    if(color)
+    {
+        if(fread(card->pixels, 1, payload_size, fp) != payload_size) goto done;
+        for(size_t i = 0; i < payload_size; ++i)
         {
-            const uint8_t bit = (row[x >> 3] >> (7u - (x & 7u))) & 1u;
-            card->pixels[y * PASS_PROFILE_W + x] = bit ? 0x00 : 0xFF;
+            const uint8_t v = card->pixels[i];
+            const uint8_t a = v >> 4, b = v & 0x0F;
+            if(!((a == 0 || a == 1 || a == 2 || a == 3 || a == 5 || a == 6) &&
+                 (b == 0 || b == 1 || b == 2 || b == 3 || b == 5 || b == 6))) goto done;
+        }
+    }
+    else
+    {
+        for(unsigned y = 0; y < PASS_PROFILE_H; ++y)
+        {
+            if(fread(row, 1, sizeof(row), fp) != sizeof(row)) goto done;
+            for(unsigned x = 0; x < PASS_PROFILE_W; ++x)
+            {
+                const uint8_t bit = (row[x >> 3] >> (7u - (x & 7u))) & 1u;
+                card->pixels[y * PASS_PROFILE_W + x] = bit ? 0x00 : 0xFF;
+            }
         }
     }
 
     memset(&card->dsc, 0, sizeof(card->dsc));
-    card->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    card->dsc.header.cf = LV_COLOR_FORMAT_L8;
-    card->dsc.header.w = PASS_PROFILE_W;
-    card->dsc.header.h = PASS_PROFILE_H;
-    card->dsc.header.stride = PASS_PROFILE_W;
-    card->dsc.data_size = sizeof(card->pixels);
-    card->dsc.data = card->pixels;
+    if(!color)
+    {
+        card->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        card->dsc.header.cf = LV_COLOR_FORMAT_L8;
+        card->dsc.header.w = PASS_PROFILE_W;
+        card->dsc.header.h = PASS_PROFILE_H;
+        card->dsc.header.stride = PASS_PROFILE_W;
+        card->dsc.data_size = PASS_PROFILE_W * PASS_PROFILE_H;
+        card->dsc.data = card->pixels;
+    }
+#ifdef ARK_UI_SIMULATOR
+    else
+    {
+        /* LVGL RGB888 像素的内存字节序是 B,G,R。 */
+        static const uint8_t bgr[7][3] = {
+            {0, 0, 0}, {255, 255, 255}, {0, 214, 255}, {48, 48, 226},
+            {0, 0, 0}, {207, 79, 32}, {69, 150, 23}
+        };
+        uint8_t *out_rgb = card->pixels + PASS_COLOR_BYTES;
+        for(size_t i = 0; i < PASS_PROFILE_W * PASS_PROFILE_H; ++i)
+        {
+            const uint8_t packed = card->pixels[i >> 1];
+            const uint8_t code = (i & 1u) ? (packed & 0x0Fu) : (packed >> 4);
+            memcpy(out_rgb + i * 3u, bgr[code], 3);
+        }
+        card->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        card->dsc.header.cf = LV_COLOR_FORMAT_RGB888;
+        card->dsc.header.w = PASS_PROFILE_W;
+        card->dsc.header.h = PASS_PROFILE_H;
+        card->dsc.header.stride = PASS_PROFILE_W * 3u;
+        card->dsc.data_size = PASS_PROFILE_W * PASS_PROFILE_H * 3u;
+        card->dsc.data = out_rgb;
+    }
+#endif
     *out = card;
     card = NULL;
     result = PASS_LOAD_OK;
@@ -119,6 +178,7 @@ done:
     return result;
 }
 
+
 static pass_load_result_t pass_prepare(void)
 {
     pass_card_t *next = NULL;
@@ -126,9 +186,29 @@ static pass_load_result_t pass_prepare(void)
     if(old != NULL) heap_caps_free(old);
 
     pass_load_result_t result = pass_load_card(&next);
+    app_status_t status;
+    app_shell_status_snapshot(&status); /* app_task 侧，与本次卡片一同进入 UI。 */
+    atomic_store(&m_status_bits, (uint32_t)status.bat_pct |
+                 ((uint32_t)status.wifi_on << 8) |
+                 ((uint32_t)status.wifi_conn << 9) |
+                 ((uint32_t)status.bt_on << 10) |
+                 ((uint32_t)status.bt_conn << 11));
     atomic_store(&m_pending, next);
     atomic_store(&m_prepare_result, result);
     return result;
+}
+
+static void pass_apply_status(void)
+{
+    const uint32_t bits = atomic_load(&m_status_bits);
+    const app_status_t status = {
+        .bat_pct = (uint8_t)(bits & 0xFFu),
+        .wifi_on = (uint8_t)((bits >> 8) & 1u),
+        .wifi_conn = (uint8_t)((bits >> 9) & 1u),
+        .bt_on = (uint8_t)((bits >> 10) & 1u),
+        .bt_conn = (uint8_t)((bits >> 11) & 1u),
+    };
+    app_shell_apply(&m_shell, &status);
 }
 
 static const char *pass_enter_block_reason(void)
@@ -162,13 +242,45 @@ static void pass_show_result(pass_load_result_t result)
     pass_card_t *next = atomic_exchange(&m_pending, NULL);
     if(next != NULL)
     {
-        /* lv_image_set_src 不复制像素；先切换描述符，再释放旧图。 */
         pass_card_t *old = m_active;
-        lv_image_set_src(m_card_img, &next->dsc);
-        m_active = next;
-        if(old != NULL) {
+        if(next->color)
+        {
+#ifdef ARK_UI_SIMULATOR
+            lv_image_set_src(m_card_img, &next->dsc);
+            lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
+            app_shell_stop_tick(&m_shell);
+#else
+            lv_area_t area;
+            lv_image_set_src(m_card_img, NULL);
+            lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
+            lv_obj_update_layout(m_card_img);
+            lv_obj_get_coords(m_card_img, &area);
+            if(ui_display_set_color_card(next->pixels, area.x1, area.y1,
+                                         PASS_PROFILE_W, PASS_PROFILE_H) != 0)
+            {
+                result = PASS_LOAD_FAILED;
+                heap_caps_free(next);
+                next = NULL;
+                if(old != NULL && !old->color) lv_image_set_src(m_card_img, &old->dsc);
+            }
+            else app_shell_stop_tick(&m_shell);
+#endif
+        }
+        else
+        {
+            ui_display_clear_color_card();
+            lv_image_set_src(m_card_img, &next->dsc);
+            lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
+            if(m_shell.tick == NULL) app_shell_start_tick(&m_shell, NULL);
+        }
+        if(next != NULL) m_active = next;
+        if(next != NULL && old != NULL) {
 #if LV_CACHE_DEF_SIZE > 0
+#ifdef ARK_UI_SIMULATOR
             lv_image_cache_drop(&old->dsc);
+#else
+            if(!old->color) lv_image_cache_drop(&old->dsc);
+#endif
 #endif
             heap_caps_free(old);
         }
@@ -235,13 +347,14 @@ static void pass_ui_create(lv_obj_t *root)
     m_result_note = pass_label(root, &ui_font_14, lv_color_black(), "");
     lv_obj_set_pos(m_result_note, SHELL_BODY_PAD_X, 672);
     pass_show_result((pass_load_result_t)atomic_load(&m_prepare_result));
-    app_shell_request_status();
-    app_shell_start_tick(&m_shell, NULL);
+    pass_apply_status();
+    if(m_active == NULL || !m_active->color) app_shell_start_tick(&m_shell, NULL);
 }
 
 static void pass_ui_destroy(void)
 {
     app_shell_release(&m_shell);
+    ui_display_clear_color_card();
     /* ui_core 会在 destroy 后删页面树，先断开 LVGL 的外部像素指针。 */
     if(m_card_img != NULL) lv_image_set_src(m_card_img, NULL);
     m_card_img = NULL;
@@ -250,7 +363,11 @@ static void pass_ui_destroy(void)
     m_result_note = NULL;
     if(m_active != NULL) {
 #if LV_CACHE_DEF_SIZE > 0
+#ifdef ARK_UI_SIMULATOR
         lv_image_cache_drop(&m_active->dsc);
+#else
+        if(!m_active->color) lv_image_cache_drop(&m_active->dsc);
+#endif
 #endif
         heap_caps_free(m_active);
     }
@@ -263,7 +380,13 @@ static void pass_ui_on_msg(uint32_t cmd, const void *data, uint8_t len)
 {
     if(cmd == APP_UI_MSG_PASS_RELOAD)
     {
-        if(data != NULL && len == 1) pass_show_result(*(const uint8_t *)data);
+        if(data != NULL && len == 1)
+        {
+            pass_show_result(*(const uint8_t *)data);
+            pass_apply_status();
+            app_shell_refresh_time(&m_shell);
+            if(m_active != NULL && m_active->color) ui_display_invalidate_all();
+        }
         return;
     }
     (void)app_shell_handle_msg(&m_shell, cmd, data, len);
