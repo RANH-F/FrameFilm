@@ -4,9 +4,9 @@
 
 ## 触发与下载
 
-- 推送到 `main`、向 `main` 提交 PR 时，限定 Flutter、复用的 Android Kotlin 源码、Ark 固件及工作流自身路径。
+- 推送到 `main`、向 `main` 提交 PR 时，限定 Flutter、复用的 Android Kotlin 源码、Ark 固件、Ark 更新日志及工作流自身路径。
 - main 推送或目标为 main 的 PR 自动构建；工作流进入默认分支后，也可从 GitHub → Actions → Ark builds → Run workflow 手动运行。
-- 两个 job 独立运行，完成后从该次运行的 Artifacts 下载。构建失败时保留已生成的日志；SDK 安装或 checkout 阶段失败请查看 Actions 步骤日志。
+- Android 与固件 job 独立运行，完成后从该次运行的 Artifacts 下载。构建失败时保留已生成的日志；SDK 安装或 checkout 阶段失败请查看 Actions 步骤日志。
 
 ## Android
 
@@ -26,14 +26,13 @@ Release/AOT APK 使用独立发行密钥，缺少配置时不会回退到 debug 
 
 使用 Espressif 官方 `espressif/idf:v5.5.2` 容器与仓库现有 `sdkconfig`（ESP32-S3、自定义 OTA 分区），不执行 `set-target` 或重置配置。依赖按 `dependencies.lock` 从 Espressif registry 解析；不依赖本机 build/managed_components。
 
-`ark-esp32s3-firmware` 包含：
+`ark-firmware-ota` 仅包含 `frame_film_ark.bin`，这是现有 OTA 流程需要的应用镜像。`ark-firmware-debug` 包含：
 
-- `frame_film_ark.bin`：应用镜像，用于现有 OTA 流程。
 - `frame_film_ark-flash.bin`：按构建生成的 flash_args 合并的串口烧录镜像，从地址 `0x0` 写入；此操作会覆盖镜像范围内的现有数据，应先备份设备数据。
 - bootloader、partition-table、OTA 初始化镜像，以及 flash_args/flasher_args.json：按该次构建生成的偏移进行分文件烧录。
 - ELF、map、sdkconfig：用于定位问题和核对构建配置。
 
-`ark-firmware-build-logs` 包含构建、merge-bin、`idf.py size` 报告及生成的 IDF 日志。CI 不连接设备、不刷机。普通构建不发布 Release；手动发布选项见下。
+`ark-firmware-build-logs` 包含构建、merge-bin、`idf.py size` 报告及生成的 IDF 日志。CI 不连接设备、不刷机。普通构建只上传 Artifacts。
 
 ## 验证范围
 
@@ -41,15 +40,28 @@ Release/AOT APK 使用独立发行密钥，缺少配置时不会回退到 debug 
 
 参考：[Flutter action](https://github.com/subosito/flutter-action)、[Gradle Java compatibility](https://docs.gradle.org/current/userguide/compatibility.html)、[Espressif 官方 CI 容器](https://github.com/espressif/esp-idf-ci-action)、[IDF 5.5.2 merge-bin 实现](https://github.com/espressif/esp-idf/blob/v5.5.2/tools/idf_py_actions/serial_ext.py)。
 
-## 可选 GitHub Release 固件发布
+## Ark 更新日志发布
 
-`workflow_dispatch` 提供 `publish_release`，默认 false。只有手动选择 main 并勾选此项，且该次 firmware 与 Android job 均成功，才运行 release job；普通 push/PR 继续只构建并上传 Artifacts。仅 release job 获得 contents:write。手动任务不启用运行中自动取消。
+编辑 [Ark 更新日志](../ARK_CHANGELOG.md) 的 `Unreleased` 内容，再新增一个正式节，例如：
 
-- 发布附件包含原始 `frame_film_ark.bin`、`framefilm-ark-flutter.apk` 和 `framefilm-ark-flutter.json`，不上传合并串口镜像作为在线升级包；release job 同时依赖 firmware 和 Android job 成功。
-- 发布 tag 为 `ark-build-运行号-尝试号`，标题按构建编号显示，target 指向本次源码 SHA；重跑使用新尝试号，不覆盖旧发布附件。
-- Release notes 记录源码提交和完整文件 SHA256。保留仓库原有 Latest 标记，客户端从最近20个正式发布中按 published_at 选含精确 Ark 资产的最新候选。
-- `3.2.5` 不参与发布选择或升级判断。文件摘要用于下载完整性，实际 ELF SHA256 用于同构建跳过及重启后确认。
-- 客户端无登录查询公开 Releases；只下载后校验导入，不自动刷机。若 GitHub 资产 digest 存在则同时核对；未提供时仍检查应用镜像自身完整性、ESP32-S3和Ark项目身份。
+```markdown
+## [2026.10.16.1] - 2026-10-16
+
+App: 0.4.1+5
+
+- 本次 Ark 固件或 App 的变更说明。
+```
+
+发布 ID 是独立且唯一的 `年.月.日.序号`，日期需与标题一致；`App:` 必须等于本次源码 `flutter_app/pubspec.yaml` 的 `version:`。固件单独更新可沿用同一个 APK 版本与构建号；App 有新版本则先提高 `pubspec.yaml` 的构建号。标题会显示 `Ark 发布 ID · App 版本+构建号`。
+
+推送到 `main` 时，只有**新出现的最新正式节**会触发发布：plan job 先创建指向本次源码的 `ark-发布ID` tag，Android 与固件都从该 tag 构建，两个 job 成功后才发布。没有新增正式节的 push 及 PR 只运行 CI。只改已有正式节的文字不会重新发布。首次发布之前保持 `Unreleased` 即可。
+
+构建或发布失败后，可重跑原失败的 Actions 运行；它保留原始源码，已存在的 tag 会继续用于补发。也可从 Actions → Ark builds → Run workflow 选择 `main` 并勾选 `publish_release`，重试当前最新正式节；若 tag 已存在，标题、版本和构建都以 tag 的源码为准。若 Release 已创建但附件不全，会补传三份 Ark 附件并更新说明；三份已齐全则跳过重复发布。若需要新内容，新增一个 ID。手动运行不勾选时只构建。整个流程不回写版本提交，现有四项 Android 签名 Secrets 保持不变。
+
+- Release 只附原始 `frame_film_ark.bin`、`framefilm-ark-flutter.apk` 和 `framefilm-ark-flutter.json`；合并串口镜像留在 debug Artifact。
+- Notes 取对应更新日志节，并附源码 commit 与 OTA 文件 SHA256。Release 保留仓库原有 Latest 标记；固件客户端从最近 20 个正式发布按 `published_at` 选含精确 Ark 镜像的候选，App 客户端优先选最高 `versionCode`（相同构建号再比发布时间）。
+- App 按 JSON `versionCode` 判断升级；固件按构建 ELF SHA256 判断同构建并在重启后确认。屏幕显示的 `3.2.5` 不作升级版本号。
+- 客户端无登录查询公开 Releases；只下载后校验导入，不自动刷机。CI 构建和发布不代表真实设备验收。
 
 2026-10-09 已推送提交 `4fa8e77`，[Actions #37910525382](https://github.com/Rafael-ban/FrameFilm/actions/runs/37910525382) 的 Android APK 与 Ark 固件 job 均成功，包含新增 Android 原生更新代码、AOT 资源检查和 APK 元数据生成。此次为普通 push，Release job 按预期跳过；公开发布与 App 内覆盖安装仍需单独验收。
 

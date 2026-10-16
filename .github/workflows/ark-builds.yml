@@ -2,14 +2,14 @@ name: Ark builds
 on:
   push:
     branches: [main]
-    paths: ['flutter_app/**', 'android/app/src/main/java/**', 'firmware/frame_film_ark/**', '.github/workflows/ark-builds.yml']
+    paths: ['flutter_app/**', 'android/app/src/main/java/**', 'firmware/frame_film_ark/**', '.github/workflows/ark-builds.yml', 'docs/ARK_CHANGELOG.md']
   pull_request:
     branches: [main]
-    paths: ['flutter_app/**', 'android/app/src/main/java/**', 'firmware/frame_film_ark/**', '.github/workflows/ark-builds.yml']
+    paths: ['flutter_app/**', 'android/app/src/main/java/**', 'firmware/frame_film_ark/**', '.github/workflows/ark-builds.yml', 'docs/ARK_CHANGELOG.md']
   workflow_dispatch:
     inputs:
       publish_release:
-        description: 'Publish Ark firmware and Flutter app to GitHub Releases (main only)'
+        description: 'Retry the latest concrete Ark changelog release (main only)'
         type: boolean
         required: false
         default: false
@@ -17,14 +17,124 @@ permissions:
   contents: read
 concurrency:
   group: ark-builds-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  cancel-in-progress: false
 jobs:
+  plan:
+    name: Plan Ark release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      publish: ${{ steps.tag.outputs.publish }}
+      tag: ${{ steps.entry.outputs.tag }}
+      title: ${{ steps.details.outputs.title }}
+      version_name: ${{ steps.details.outputs.versionName }}
+      version_code: ${{ steps.details.outputs.versionCode }}
+      source_ref: ${{ steps.tag.outputs.source_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read new Ark changelog entry
+        id: entry
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/previous-ark-changelog.md"
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ -n "$BEFORE_SHA" ]; then
+            git show "${BEFORE_SHA}:docs/ARK_CHANGELOG.md" > "$RUNNER_TEMP/previous-ark-changelog.md" 2>/dev/null || true
+          fi
+          candidate_args=()
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            candidate_args=('' --candidate)
+          fi
+          node flutter_app/tool/ark_release_plan.cjs docs/ARK_CHANGELOG.md \
+            "$RUNNER_TEMP/previous-ark-changelog.md" flutter_app/pubspec.yaml \
+            "$GITHUB_EVENT_NAME" "${candidate_args[@]}"
+      - name: Fix release source and check existing release
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.entry.outputs.tag }}
+          PLANNED: ${{ steps.entry.outputs.publish }}
+          REQUESTED: ${{ inputs.publish_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$PLANNED" != true ] || { [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$REQUESTED" != true ]; }; then
+            exit 0
+          fi
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            exit 0
+          fi
+          release_status="$(curl --silent --show-error --location \
+            --output "$RUNNER_TEMP/ark-release.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GH_REPO/releases/tags/$TAG")"
+          case "$release_status" in
+            200)
+              complete=true
+              for asset in frame_film_ark.bin framefilm-ark-flutter.apk framefilm-ark-flutter.json; do
+                if ! jq -e --arg name "$asset" \
+                  'any(.assets[]; .name == $name and .state == "uploaded" and .size > 0)' \
+                  "$RUNNER_TEMP/ark-release.json" >/dev/null; then
+                  complete=false
+                fi
+              done
+              if [ "$complete" = true ]; then
+                echo "Release $TAG already has all Ark assets; build remains CI-only."
+                exit 0
+              fi
+              echo "Release $TAG is incomplete; restoring assets."
+              ;;
+            404) ;;
+            *) echo "::error::GitHub release lookup failed: HTTP $release_status"; exit 1 ;;
+          esac
+          existing="$(git ls-remote --tags --refs origin "refs/tags/$TAG" | cut -f1)"
+          if [ -n "$existing" ]; then
+            if [ "$GITHUB_EVENT_NAME" = push ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "Tag $TAG belongs to another commit; push remains CI-only."
+              exit 0
+            fi
+          else
+            if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+              GITHUB_OUTPUT='' node flutter_app/tool/ark_release_plan.cjs docs/ARK_CHANGELOG.md \
+                /dev/null flutter_app/pubspec.yaml workflow_dispatch
+            fi
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "source_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+      - name: Read release details from fixed tag
+        id: details
+        if: steps.tag.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.entry.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          git show "$TAG:docs/ARK_CHANGELOG.md" > "$RUNNER_TEMP/tag-ark-changelog.md"
+          git show "$TAG:flutter_app/pubspec.yaml" > "$RUNNER_TEMP/tag-pubspec.yaml"
+          node flutter_app/tool/ark_release_plan.cjs "$RUNNER_TEMP/tag-ark-changelog.md" \
+            /dev/null "$RUNNER_TEMP/tag-pubspec.yaml" workflow_dispatch
+
   android:
     name: Flutter Android release APK
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    needs: plan
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_ref }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -108,6 +218,7 @@ jobs:
     name: Ark ESP32-S3 firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    needs: plan
     container: espressif/idf:v5.5.2
     defaults:
       run:
@@ -115,6 +226,8 @@ jobs:
         working-directory: firmware/frame_film_ark
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_ref }}
       - name: Build Ark and size report
         run: |
           set -euo pipefail
@@ -124,13 +237,18 @@ jobs:
           idf.py build 2>&1 | tee ci-logs/build.log
           idf.py size 2>&1 | tee ci-logs/size.log
           idf.py merge-bin -o frame_film_ark-flash.bin 2>&1 | tee ci-logs/merge.log
-      - name: Upload Ark firmware
+      - name: Upload Ark OTA image
         uses: actions/upload-artifact@v4
         with:
-          name: ark-esp32s3-firmware
+          name: ark-firmware-ota
+          if-no-files-found: error
+          path: firmware/frame_film_ark/build/frame_film_ark.bin
+      - name: Upload Ark serial flash and debug files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ark-firmware-debug
           if-no-files-found: error
           path: |
-            firmware/frame_film_ark/build/frame_film_ark.bin
             firmware/frame_film_ark/build/frame_film_ark-flash.bin
             firmware/frame_film_ark/build/bootloader/bootloader.bin
             firmware/frame_film_ark/build/partition_table/partition-table.bin
@@ -152,49 +270,67 @@ jobs:
 
   release:
     name: Publish Ark firmware and app
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release && github.ref == 'refs/heads/main'
-    needs: [firmware, android]
+    if: needs.plan.outputs.publish == 'true'
+    needs: [plan, firmware, android]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_ref }}
       - name: Download this run's firmware
         uses: actions/download-artifact@v4
         with:
-          name: ark-esp32s3-firmware
+          name: ark-firmware-ota
           path: release-input
       - name: Download this run's app
         uses: actions/download-artifact@v4
         with:
           name: ark-flutter-release-apk
           path: app-release-input
-      - name: Publish application image
+      - name: Publish Ark release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_TITLE: ${{ needs.plan.outputs.title }}
+          VERSION_NAME: ${{ needs.plan.outputs.version_name }}
+          VERSION_CODE: ${{ needs.plan.outputs.version_code }}
         shell: bash
         run: |
           set -euo pipefail
           image="$(find release-input -type f -name frame_film_ark.bin -print -quit)"
-          test -n "$image"
           apk="$(find app-release-input -type f -name framefilm-ark-flutter.apk -print -quit)"
           metadata="$(find app-release-input -type f -name framefilm-ark-flutter.json -print -quit)"
-          test -n "$apk" && test -n "$metadata"
-          tag="ark-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          test -s "$image" && test -s "$apk" && test -s "$metadata"
+          node -e 'const m=require("./"+process.argv[1]); if(m.versionName!==process.env.VERSION_NAME || String(m.versionCode)!==process.env.VERSION_CODE) process.exit(1)' "$metadata"
+          node flutter_app/tool/ark_release_plan.cjs docs/ARK_CHANGELOG.md \
+            /dev/null flutter_app/pubspec.yaml workflow_dispatch release-notes.md
           digest="$(sha256sum "$image" | cut -d ' ' -f 1)"
-          cat > release-notes.md <<EOF
-          Ark OTA application image for ESP32-S3 / frame_film_ark.
+          cat >> release-notes.md <<EOF
 
-          Source commit: ${GITHUB_SHA}
-          File SHA256: ${digest}
+          Source commit: $(git rev-parse HEAD)
+          OTA image SHA256: ${digest}
 
-          Import frame_film_ark.bin in the Ark app. This is not a merged serial-flash image.
-          The displayed firmware version is not an update identifier; the app verifies the actual ELF build fingerprint after reboot.
-          Flutter Android app: framefilm-ark-flutter.apk (Android 9+).
-          The app checks framefilm-ark-flutter.json for versionCode and downloads the APK in-app.
-          Build completion is not a device acceptance test.
+          frame_film_ark.bin is the OTA application image, not a merged serial-flash image.
+          The app checks framefilm-ark-flutter.json for versionCode; firmware updates use the ELF build fingerprint.
           EOF
-          gh release create "$tag" "$image" "$apk" "$metadata" --repo "$GH_REPO" \
-            --target "$GITHUB_SHA" --title "Ark build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}" \
-            --notes-file release-notes.md --latest=false
+          release_status="$(curl --silent --show-error --location \
+            --output "$RUNNER_TEMP/ark-release.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GH_REPO/releases/tags/$TAG")"
+          case "$release_status" in
+            200)
+              gh release upload "$TAG" "$image" "$apk" "$metadata" --repo "$GH_REPO" --clobber
+              gh release edit "$TAG" --repo "$GH_REPO" --title "$RELEASE_TITLE" --notes-file release-notes.md
+              ;;
+            404)
+              gh release create "$TAG" "$image" "$apk" "$metadata" --repo "$GH_REPO" \
+                --verify-tag --title "$RELEASE_TITLE" \
+                --notes-file release-notes.md --latest=false
+              ;;
+            *) echo "::error::GitHub release lookup failed: HTTP $release_status"; exit 1 ;;
+          esac
