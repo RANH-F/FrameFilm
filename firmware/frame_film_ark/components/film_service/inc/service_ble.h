@@ -105,6 +105,7 @@ extern "C"{
 #define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
+#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证
 #define BLE_DIRECT_START_DATA_MAX                         (192)
 
 /* 蓝牙设备名 = 编译期前缀 "FRAMEFILMARK-" (13B) + 可配置后缀 (1..16B)，完整名上限 29B
