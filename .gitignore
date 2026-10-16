@@ -2,3 +2,18 @@
 .trae/
 .output/
 design/
+
+# Local development records and conversation attachments
+/docs/development/
+/.codex-remote-attachments/
+
+# Generated dependencies and build caches
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local operating-system files
+.DS_Store
+Thumbs.db

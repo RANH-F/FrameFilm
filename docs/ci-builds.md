@@ -42,7 +42,7 @@ Release/AOT APK 使用独立发行密钥，缺少配置时不会回退到 debug 
 
 ## Ark 更新日志发布
 
-编辑 [Ark 更新日志](../ARK_CHANGELOG.md) 的 `Unreleased` 内容，再新增一个正式节，例如：
+编辑 [Ark 更新日志](ARK_CHANGELOG.md) 的 `Unreleased` 内容，再新增一个正式节，例如：
 
 ```markdown
 ## [2026.10.16.1] - 2026-10-16
