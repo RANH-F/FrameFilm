@@ -35,7 +35,7 @@ ARK_PASS_PROFILE="$PWD/.output/ark/logs/pass-preview/profile.bin" \
   ./tools/ark-ui-simulator/build/ark-ui-simulator
 ```
 
-上例指向本机验证用样例文件；使用自己的资料时换成实际导出路径。按数字 5 打开通行证，单击 Enter 重新加载同一路径；没有配置文件时显示空状态，加载失败保留当前通行证。主体图必须为 440×608、1bit FFUI，格式见 [`ark-pass-editor`](../ark-pass-editor/README.md)。这模拟的是设备读取显示资源，不模拟蓝牙或 SD 硬件。
+上例指向本机验证用样例文件；使用自己的资料时换成实际导出路径。按数字 5 打开通行证，单击 Enter 重新加载同一路径；没有配置文件时显示空状态，加载失败保留当前通行证。主体图为 440×608，支持原 1bit FFUI v1 与六色 4bpp FFUI v2，格式见 [`ark-pass-editor`](../ark-pass-editor/README.md)。模拟器将 v2 色码映射成桌面 RGB 预览；实机则在 UI 刷新时把卡片与黑白外壳合成后走面板原生 4bpp。这里不模拟蓝牙、SD 或实机电子纸刷新。
 
 模拟器把 LVGL 的内存分配接到桌面 C `malloc`，供快速切页预览；固件使用自己的 ESP-IDF heap 配置。两者的可用内存和分配失败行为不能互推。
 

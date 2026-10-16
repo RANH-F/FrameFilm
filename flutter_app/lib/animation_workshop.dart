@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import 'animation_film.dart';
@@ -16,6 +17,16 @@ typedef PlayAnimationOnDevice = Future<void> Function({
   required int intervalMs,
   required int loopSeconds,
 });
+
+// Claim pen strokes before an ancestor Scrollable can win a vertical drag.
+// This recognizer is installed only over the active, idle pen canvas.
+class _CanvasPanGestureRecognizer extends PanGestureRecognizer {
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    resolve(GestureDisposition.accepted);
+  }
+}
 
 class AnimationFrameTransform {
   AnimationFrameTransform(this.source);
@@ -640,52 +651,63 @@ class _AnimationWorkshopState extends State<AnimationWorkshop> {
                   ),
                   child: _drawing
                       ? LayoutBuilder(
-                          builder: (context, constraints) => GestureDetector(
-                            onTapDown:
-                                !_busy && _controller.drawingTool != 'pen'
-                                ? (d) => _rasterTool(
-                                    d.localPosition,
-                                    Size(
-                                      constraints.maxWidth,
-                                      constraints.maxHeight,
+                          builder: (context, constraints) => RawGestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            gestures: {
+                              if (!_busy && _controller.drawingTool != 'pen')
+                                TapGestureRecognizer:
+                                    GestureRecognizerFactoryWithHandlers<
+                                      TapGestureRecognizer
+                                    >(
+                                      () => TapGestureRecognizer(),
+                                      (recognizer) =>
+                                          recognizer.onTapDown = (d) =>
+                                              _rasterTool(
+                                                d.localPosition,
+                                                Size(
+                                                  constraints.maxWidth,
+                                                  constraints.maxHeight,
+                                                ),
+                                              ),
                                     ),
-                                  )
-                                : null,
-                            onPanStart:
-                                _busy || _controller.drawingTool != 'pen'
-                                ? null
-                                : (d) => setState(() {
-                                    _strokes.add([
-                                      Offset(
-                                        d.localPosition.dx *
-                                            480 /
-                                            constraints.maxWidth,
-                                        d.localPosition.dy *
-                                            720 /
-                                            constraints.maxHeight,
-                                      ),
-                                    ]);
-                                    _strokeColors.add(_color);
-                                    _controller.strokeWidths.add(_brush);
-                                    _controller.strokeSymmetry.add(
-                                      _controller.symmetry,
-                                    );
-                                  }),
-                            onPanUpdate:
-                                _busy || _controller.drawingTool != 'pen'
-                                ? null
-                                : (d) => setState(
-                                    () => _strokes.last.add(
-                                      Offset(
-                                        d.localPosition.dx *
-                                            480 /
-                                            constraints.maxWidth,
-                                        d.localPosition.dy *
-                                            720 /
-                                            constraints.maxHeight,
-                                      ),
-                                    ),
-                                  ),
+                              if (!_busy && _controller.drawingTool == 'pen')
+                                _CanvasPanGestureRecognizer:
+                                    GestureRecognizerFactoryWithHandlers<
+                                      _CanvasPanGestureRecognizer
+                                    >(() => _CanvasPanGestureRecognizer(), (
+                                      recognizer,
+                                    ) {
+                                      recognizer.onStart = (d) => setState(() {
+                                        _strokes.add([
+                                          Offset(
+                                            d.localPosition.dx *
+                                                480 /
+                                                constraints.maxWidth,
+                                            d.localPosition.dy *
+                                                720 /
+                                                constraints.maxHeight,
+                                          ),
+                                        ]);
+                                        _strokeColors.add(_color);
+                                        _controller.strokeWidths.add(_brush);
+                                        _controller.strokeSymmetry.add(
+                                          _controller.symmetry,
+                                        );
+                                      });
+                                      recognizer.onUpdate = (d) => setState(
+                                        () => _strokes.last.add(
+                                          Offset(
+                                            d.localPosition.dx *
+                                                480 /
+                                                constraints.maxWidth,
+                                            d.localPosition.dy *
+                                                720 /
+                                                constraints.maxHeight,
+                                          ),
+                                        ),
+                                      );
+                                    }),
+                            },
                             child: Stack(
                               fit: StackFit.expand,
                               children: [

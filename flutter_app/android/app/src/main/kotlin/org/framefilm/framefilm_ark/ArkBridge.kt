@@ -93,6 +93,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         val bytes = java.io.ByteArrayOutputStream()
         var total = -1
         var binDone = false
+        var filesStarted = false
         var jsonDone = false
         var retries = 0
     }
@@ -247,7 +248,15 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "loadPassportDraft" -> result.success(drafts.getString("json", null))
                 "savePassportDraft" -> {
                     val json = requireNotNull(call.argument<String>("json"))
-                    validatePassport(json)
+                    require(json.toByteArray(Charsets.UTF_8).size <= 8000000) { "本地草稿超过8MB" }
+                    val draft = org.json.JSONObject(json)
+                    if (draft.optInt("draftVersion") == 2) {
+                        validatePassport(draft.getJSONObject("profile").toString())
+                        val editor = draft.getJSONObject("avatarEditor")
+                        val source = editor.getString("source")
+                        require(source.startsWith("data:image/png;base64,") && source.length <= 6000000) { "头像源图无效" }
+                        editor.getJSONObject("options")
+                    } else validatePassport(json)
                     check(drafts.edit().putString("json", json).commit()) { "草稿保存失败" }
                     result.success(null)
                 }
@@ -669,6 +678,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         }
         require(value.get("codenameUnset") is Boolean && value.get("numberUnset") is Boolean) { "未设置标记无效" }
         require(value.has("avatar") && (value.isNull("avatar") || value.get("avatar") is String)) { "头像字段无效" }
+        require(!value.has("avatarMode") || value.get("avatarMode") in setOf("mono", "grayscale", "color")) { "头像显示模式无效" }
     }
 
     private fun checkPassportAvailable() {
@@ -690,12 +700,16 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         val job = passportJob ?: return
         passportJob = null; refreshing = false; passportPhase = phase
         passportMessage = if (phase != "done" && job.expected != null) {
-            val progress = when {
-                job.jsonDone -> "两个文件已发送，但资料回读未确认，位图未校验。"
-                job.binDone -> "profile.bin 已发送，profile.json 未确认完成。"
-                else -> "profile.bin 未确认完成，profile.json 尚未发送。"
+            if (!job.filesStarted) {
+                "$detail；资料文件未发送，原资料保留。"
+            } else {
+                val progress = when {
+                    job.jsonDone -> "两个文件已发送，但资料回读未确认，位图未校验。"
+                    job.binDone -> "profile.bin 已发送，profile.json 未确认完成。"
+                    else -> "profile.bin 未确认完成，profile.json 尚未发送。"
+                }
+                "$detail。$progress 请重新连接后从头重试。"
             }
-            "$detail。$progress 请重新连接后从头重试。"
         } else if (phase != "done") "$detail；之前读取的资料保留。" else detail
         emit(); job.result.success(snapshot())
     }
@@ -752,14 +766,44 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         val raw = requireNotNull(call.argument<String>("json")) { "缺少资料 JSON" }
         validatePassport(raw)
         val bin = requireNotNull(call.argument<ByteArray>("bin")) { "缺少位图" }
-        require(bin.size == 33456 && bin.copyOfRange(0, 6).contentEquals(byteArrayOf(70,70,85,73,1,1)) &&
+        val color = org.json.JSONObject(raw).optString("avatarMode", "mono") == "color"
+        val version = if (color) 2.toByte() else 1.toByte()
+        require(bin.size == (if (color) 133776 else 33456) && bin.copyOfRange(0, 6).contentEquals(byteArrayOf(70,70,85,73,version,version)) &&
             (bin[6].toInt() and 255) == 184 && (bin[7].toInt() and 255) == 1 &&
             (bin[8].toInt() and 255) == 96 && (bin[9].toInt() and 255) == 2 &&
-            bin.copyOfRange(10,16).all { it == 0.toByte() }) { "位图必须为 FFUI v1 440×608 单色文件（33456B）" }
+            bin.copyOfRange(10,16).all { it == 0.toByte() }) { "位图必须为 440×608 FFUI v1 单色或 v2 六色文件，且与头像模式一致" }
+        val colorCodes = setOf(0, 1, 2, 3, 5, 6)
+        if (color) require(bin.asSequence().drop(16).all {
+            val b = it.toInt() and 255
+            (b ushr 4) in colorCodes && (b and 15) in colorCodes
+        }) { "彩色资料包含无效颜色编码" }
         val json = raw.toByteArray(Charsets.UTF_8)
         val job = PassportJob(result, raw)
         passportJob = job; refreshing = true; passportPhase = "sending"
         passportCompleted = 0; passportTotal = bin.size + json.size
+        passportMessage = if (color) "正在查询彩色通行证能力" else "正在发送 profile.bin"; emit()
+        if (color) {
+            request(0x59) { capabilities ->
+                if (passportJob !== job) return@request
+                if (capabilities.size != 5 || capabilities[0].toInt() != 1 || (u32(capabilities, 1) and 1L) == 0L) {
+                    finishPassport("error", "设备不支持彩色通行证，请升级固件；未发送资料文件")
+                } else uploadPassport(job, bin, json)
+            }
+            pending?.let { read ->
+                read.timeout?.let(main::removeCallbacks)
+                read.timeout = Runnable {
+                    if (pending === read) {
+                        pending = null
+                        finishPassport("error", "设备未响应彩色能力查询，请升级固件；未发送资料文件")
+                    }
+                }.also { main.postDelayed(it, 5000) }
+            }
+        } else uploadPassport(job, bin, json)
+    }
+
+    private fun uploadPassport(job: PassportJob, bin: ByteArray, json: ByteArray) {
+        if (passportJob !== job) return
+        job.filesStarted = true
         passportMessage = "正在发送 profile.bin"; emit()
         uploadPassportFile(job, "app/pass/profile.bin", bin, 0) {
             job.binDone = true; passportMessage = "profile.bin 已发送，正在发送 profile.json"; emit()
@@ -804,7 +848,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
 
     // FILE_LIST has no terminal packet. The subsequent 0x08 reply is the
     // ordered end marker, including for an empty directory.
-    private fun listDeviceFiles() {
+    private fun listDeviceFiles(done: (() -> Unit)? = null) {
         deviceFiles.clear(); filesLoaded = false; currentFileId = null
         fileListing = true; filesMessage = "正在读取当前目录"
         writeFilesCommand(0x06, byteArrayOf()) {
@@ -813,7 +857,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 currentFileId = (data[0].toInt() and 255).takeIf { it != 255 }
                 fileListing = false; filesLoaded = true
                 filesMessage = "已读取当前目录；文件 ID 会随删除或设备操作变化"
-                finishSettings(filesMessage)
+                if (done == null) finishSettings(filesMessage) else done()
             }
             pending?.let { read ->
                 read.timeout?.let(main::removeCallbacks)
@@ -841,6 +885,9 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
             require(id != null && id in 0..255 && filesLoaded && deviceFiles[id] == call.argument<String>("name")) {
                 "文件列表已变化，请刷新后重试"
             }
+        }
+        if (call.method == "displayDeviceFile") require(fileDirectory in setOf("film", "animation")) {
+            "请先选择图片目录或动画目录，再选择要显示的文件"
         }
         val appId = call.argument<Number>("appId")?.toInt()
         if (call.method == "setDeviceFileDirectory") require(appId == 0 || appId == 3) { "仅支持图片或动画目录" }
@@ -878,6 +925,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
             }
 
             "listDeviceFiles" -> listDeviceFiles()
+            "displayDeviceFile" -> displayDeviceFile(id!!, call.argument<String>("name")!!)
             "setDeviceFileDirectory" -> writeFilesCommand(0x4B, byteArrayOf(appId!!.toByte())) {
                 main.postDelayed({
                     if (connected && refreshing) request(0x4C) { data ->
@@ -891,12 +939,65 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                     }
                 }, 400)
             }
-            else -> writeFilesCommand(if (call.method == "deleteDeviceFile") 0x05 else 0x07, byteArrayOf(id!!.toByte())) {
-                filesMessage = if (call.method == "deleteDeviceFile") "删除命令已发送，正在重新读取列表" else "显示命令已发送；回读 ID 不代表屏幕刷新完成"
+            else -> writeFilesCommand(0x05, byteArrayOf(id!!.toByte())) {
+                filesMessage = "删除命令已发送，正在重新读取列表"
                 main.postDelayed({ if (connected && refreshing) listDeviceFiles() }, 400)
             }
         }
         emit()
+    }
+
+    private fun displayDeviceFile(id: Int, expectedName: String) {
+        val targetApp = if (fileDirectory == "film") 0 else 3
+        val setChannel = if (targetApp == 0) 0x45 else 0x49
+        val tag = if (targetApp == 0) 3 else 4
+        // The protocol cannot query the directory itself. A cached label is only
+        // usable while its owning app is still active; a menu may retain either directory.
+        request(0x4C) { page ->
+            require(page.size == 1) { "当前页面响应无效" }
+            if ((page[0].toInt() and 255) != targetApp) {
+                fileDirectory = "current"; filesLoaded = false; deviceFiles.clear(); currentFileId = null
+                finishSettings("设备页面已变化，请先选择图片目录或动画目录，再刷新选择文件", true)
+                return@request
+            }
+            // IDs can change following local device operations. Re-read before
+            // applying a persisted app cursor, rather than trusting the UI snapshot.
+            listDeviceFiles {
+                if (deviceFiles[id] != expectedName) {
+                    finishSettings("文件列表已变化，请从刷新后的列表重新选择", true)
+                    return@listDeviceFiles
+                }
+                val payload = byteArrayOf(tag.toByte(), 4, 0, 0, 0, id.toByte())
+                writeFilesCommand(setChannel, payload) {
+                    request(setChannel + 1) { data ->
+                        var offset = 0
+                        var confirmedId: Long? = null
+                        while (offset + 2 <= data.size) {
+                            val itemTag = data[offset++].toInt() and 255
+                            val length = data[offset++].toInt() and 255
+                            require(offset + length <= data.size) { "文件参数响应无效" }
+                            if (itemTag == tag) {
+                                require(length == 4) { "文件参数长度无效" }
+                                var value = 0L
+                                repeat(length) { value = (value shl 8) or (data[offset + it].toLong() and 255) }
+                                confirmedId = value
+                            }
+                            offset += length
+                        }
+                        require(offset == data.size && confirmedId == id.toLong()) { "文件参数回读不一致，请刷新后重试" }
+                        request(0x4C) { current ->
+                            require(current.size == 1) { "当前页面响应无效" }
+                            if ((current[0].toInt() and 255) == targetApp) {
+                                listDeviceFiles()
+                            } else {
+                                fileDirectory = "current"; filesLoaded = false; deviceFiles.clear(); currentFileId = null
+                                finishSettings("文件参数已保存，但设备页面已变化，请重新选择目录", true)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun remoteCommand(call: MethodCall, result: MethodChannel.Result) {

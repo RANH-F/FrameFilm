@@ -110,6 +110,9 @@ void app_shell_request_status(void);
  * @param cb 周期钩子；传 NULL 表示"重新采集状态栏数据"（app_shell_request_status）
  */
 void app_shell_start_tick(app_shell_t *s, app_shell_tick_cb_t cb);
+void app_shell_stop_tick(app_shell_t *s);
+/* 页面显式刷新时可更新时钟；彩色页不启动周期 tick。 */
+void app_shell_refresh_time(app_shell_t *s);
 
 /**
  * @brief 释放外壳（页面 destroy 里必须调）
@@ -140,6 +143,8 @@ int app_shell_handle_msg(app_shell_t *s, uint32_t cmd, const void *data, uint8_t
  * 采集必须留在 app 任务侧：电池 / g_service_param 没有跨任务保证。
  */
 void app_shell_on_event(const app_event_t *e);
+/* app_task 侧采集一次状态；用于通行证首帧/手动重载合并刷新。 */
+void app_shell_status_snapshot(app_status_t *st);
 
 #ifdef __cplusplus
 }

@@ -177,7 +177,8 @@ class PreviewDeviceGateway implements DeviceGateway {
       case 'savePassport':
         final json = arguments!['json'] as String;
         final bin = arguments['bin'] as Uint8List;
-        if (bin.length != 33456 || utf8.encode(json).length > 350000) {
+        if ((bin.length != 33456 && bin.length != 133776) ||
+            utf8.encode(json).length > 350000) {
           throw ArgumentError('通行证文件大小无效');
         }
         _startPassport(json: json);
@@ -465,7 +466,10 @@ class PreviewDeviceGateway implements DeviceGateway {
     final saving = json != null;
     final oldJson = _passport['json'];
     final total = saving
-        ? 33456 + utf8.encode(json).length
+        ? ((jsonDecode(json) as Map)['avatarMode'] == 'color'
+                  ? 133776
+                  : 33456) +
+              utf8.encode(json).length
         : utf8.encode(_savedPassport ?? '').length;
     _passport = {
       'phase': saving ? 'sending' : 'reading',

@@ -4,7 +4,7 @@ param(
     [string[]]$FlutterArguments
 )
 $ErrorActionPreference = 'Stop'
-# Web is the development preview; APKs default to Release even while temporarily debug-signed.
+# Web is the development preview; APKs default to distribution-signed Release.
 if ($FlutterArguments.Count -ge 2 -and $FlutterArguments[0] -eq 'build' -and
     !(@('--debug', '--profile', '--release') | Where-Object { $FlutterArguments -contains $_ })) {
     if ($FlutterArguments[1] -eq 'web') { $FlutterArguments += '--debug' }
@@ -31,6 +31,7 @@ if (Test-Path -LiteralPath $localBuild) {
 }
 New-Item -ItemType Directory -Path $temporary -Force | Out-Null
 $values = @{
+    FRAMEFILM_SIGNING_PROPERTIES = $(if ($env:FRAMEFILM_SIGNING_PROPERTIES) { $env:FRAMEFILM_SIGNING_PROPERTIES } else { 'D:\FrameFilm-signing\key.properties' })
     ANDROID_HOME = $sdk
     ANDROID_SDK_ROOT = $sdk
     GRADLE_USER_HOME = (Join-Path $storage 'gradle-home')

@@ -43,6 +43,8 @@ class DeviceFilesPage extends StatelessWidget {
           .whereType<Map>()
           .toList();
       final available = controller.canEditSettings;
+      final knownDirectory =
+          files['directory'] == 'film' || files['directory'] == 'animation';
       final directory = switch (files['directory']) {
         'film' => '图片 / film',
         'animation' => '动画 / animation',
@@ -88,6 +90,11 @@ class DeviceFilesPage extends StatelessWidget {
           const Text(
             '目录切换会切换设备上的图片或动画 app。空目录或未注册的 app 可能无法进入；可刷新设备当前目录。协议不提供任意路径浏览。',
           ),
+          if (snapshot.connected && !knownDirectory)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text('显示文件前，请先选择图片目录或动画目录，确认文件所属 app。'),
+            ),
           if (controller.busy || snapshot.settingsBusy) ...[
             const SizedBox(height: 16),
             const LinearProgressIndicator(),
@@ -117,6 +124,12 @@ class DeviceFilesPage extends StatelessWidget {
                         ? '尚未连接设备'
                         : files['loaded'] == true
                         ? '当前目录没有文件'
+                        : controller.automaticFilesLoading
+                        ? '正在自动读取设备文件…'
+                        : controller.automaticFilesPending
+                        ? '等待设备就绪后自动读取文件…'
+                        : controller.automaticFilesFailed
+                        ? '自动读取未完成，请点击刷新重试'
                         : '点击刷新读取设备文件',
                   ),
                 ],
@@ -148,7 +161,7 @@ class DeviceFilesPage extends StatelessWidget {
                       spacing: 8,
                       children: [
                         TextButton.icon(
-                          onPressed: available
+                          onPressed: available && knownDirectory
                               ? () => controller.command('displayDeviceFile', {
                                   'id': entry['id'],
                                   'name': entry['name'],

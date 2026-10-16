@@ -399,7 +399,7 @@ void app_shell_start_tick(app_shell_t *s, app_shell_tick_cb_t cb)
     }
 }
 
-void app_shell_release(app_shell_t *s)
+void app_shell_stop_tick(app_shell_t *s)
 {
     if(s == NULL)
     {
@@ -413,6 +413,17 @@ void app_shell_release(app_shell_t *s)
         lv_timer_delete(s->tick);
         s->tick = NULL;
     }
+}
+
+void app_shell_refresh_time(app_shell_t *s)
+{
+    shell_time_update(s);
+}
+
+void app_shell_release(app_shell_t *s)
+{
+    if(s == NULL) return;
+    app_shell_stop_tick(s);
     memset(s, 0, sizeof(*s));
 }
 
@@ -455,15 +466,10 @@ int app_shell_handle_msg(app_shell_t *s, uint32_t cmd, const void *data, uint8_t
     return 1;
 }
 
-void app_shell_on_event(const app_event_t *e)
+void app_shell_status_snapshot(app_status_t *st)
 {
-    app_status_t st;
     int level;
-
-    if(e->type != APP_EVT_UI_MSG || e->cmd != APP_UI_REQ_STATUS_SYNC)
-    {
-        return;
-    }
+    if(st == NULL) return;
 
     level = hal_bat_get_percent();
     if(level < 0)
@@ -474,13 +480,20 @@ void app_shell_on_event(const app_event_t *e)
     {
         level = 100;
     }
-    st.bat_pct = (uint8_t)level;
-    st.wifi_on = g_service_param.network.wifi_enable ? 1 : 0;
-    st.bt_on   = g_service_param.ble.ble_enable ? 1 : 0;
+    st->bat_pct = (uint8_t)level;
+    st->wifi_on = g_service_param.network.wifi_enable ? 1 : 0;
+    st->bt_on   = g_service_param.ble.ble_enable ? 1 : 0;
     /* 只有"开着"才去问"连上没有"：栈没起时那两个查询只会返回未连接，
        但"关着"与"连着"在状态栏是两档不同的表现，别让它们混起来 */
-    st.wifi_conn = (st.wifi_on && service_wifi_get_connect_status()) ? 1 : 0;
-    st.bt_conn   = (st.bt_on && service_ble_gatts_get_connect()) ? 1 : 0;
+    st->wifi_conn = (st->wifi_on && service_wifi_get_connect_status()) ? 1 : 0;
+    st->bt_conn   = (st->bt_on && service_ble_gatts_get_connect()) ? 1 : 0;
+}
+
+void app_shell_on_event(const app_event_t *e)
+{
+    app_status_t st;
+    if(e->type != APP_EVT_UI_MSG || e->cmd != APP_UI_REQ_STATUS_SYNC) return;
+    app_shell_status_snapshot(&st);
 
     (void)ui_core_post(APP_UI_MSG_STATUS, &st, (uint8_t)sizeof(st));
 }

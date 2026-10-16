@@ -48,6 +48,8 @@
 /* app 状态 blob：6 字节头 + app 数据（app 数据上限见 service_param.h 的
  * SERVICE_PARAM_APP_DATA_MAX，各 app 以 _Static_assert 校验自身结构体不超限） */
 #define SERVICE_PARAM_APP_MAGIC                                 (0xA55A)
+#define SERVICE_PARAM_VER_V5                                    (5)
+#define SERVICE_PARAM_V5_BLE_NAME_KEY                            "ble_name"
 
 /*********************************************************************
 * TYPEDEFS
@@ -59,6 +61,19 @@ typedef struct __attribute__((packed))
     uint8_t  version;  // app 状态结构体版本
     uint8_t  rsvd;
 } service_param_app_hdr_t;
+
+/* v5 的唯一布局差异是 BLE 分组只有 ble_enable。沿用相同的分组类型和
+ * 4 字节打包规则读取旧 blob，避免把新增的名称字段当作旧数据读取。 */
+#pragma pack(4)
+typedef struct
+{
+    uint8_t param_ver;
+    ServiceSys_Def_t sys;
+    ServiceSleep_Def_t sleep;
+    ServiceNetwork_Def_t network;
+    uint8_t ble_enable;
+} service_param_v5_t;
+#pragma pack()
 
 /*********************************************************************
  * CONSTANTS
@@ -158,7 +173,7 @@ static void service_param_set_default(void)
     /* 时区默认 UTC（= 改动前的行为）。想默认东八区就把它改成 +480。
        注意 localtime_r 依赖 TZ 环境变量，光设这个字段不生效 —— 由 service_time 应用。 */
     g_service_param.sys.tz_min = 0;
-    g_service_param.sys.led_mode = SERVICE_LED_MODE_ALWAYS;
+    g_service_param.sys.led_mode = SERVICE_LED_MODE_AUTO;
 
     g_service_param.sleep.sleep_mode = 1;  // 休眠模式默认开启
     g_service_param.sleep.sleep_auto = 0;  // 自动唤醒默认关闭
@@ -198,37 +213,84 @@ static void nvs_init(void)
     err = nvs_open(SYS_M_NVS_NAMESPACE, NVS_READWRITE, &my_nvs_handle);
     SYS_ERROR_CHECK(err);
 
-    int retry = 6;
-    while(retry--)
+    size_t stored_size = 0;
+    err = nvs_get_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME, NULL, &stored_size);
+    if(err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND)
     {
-        size_t required_size = sizeof(g_service_param);
-        err = nvs_get_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME, &g_service_param, &required_size);
+        SYS_ERROR_CHECK(err);
+        nvs_close(my_nvs_handle);
+        return;
+    }
 
-        if(err == ESP_ERR_NVS_NOT_FOUND ||
-           g_service_param.sys.factory_flag != SERVICE_FACTORY_DEFAULT_FLAG ||
-           g_service_param.param_ver != SERVICE_PARAM_VER) //FACTORY RESET / 布局版本变更
+    if(err == ESP_OK && stored_size == sizeof(g_service_param))
+    {
+        ServiceParam_Def_t stored = {0};
+        size_t size = sizeof(stored);
+        err = nvs_get_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME, &stored, &size);
+        if(err != ESP_OK)
         {
-            service_param_set_default();
-
-            err = nvs_set_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME, &g_service_param, sizeof(g_service_param));
             SYS_ERROR_CHECK(err);
-            err = nvs_commit(my_nvs_handle);
-            SYS_ERROR_CHECK(err);
+            nvs_close(my_nvs_handle);
+            return;
         }
-        else
+        if(err == ESP_OK && size == sizeof(stored) &&
+           stored.param_ver == SERVICE_PARAM_VER &&
+           stored.sys.factory_flag == SERVICE_FACTORY_DEFAULT_FLAG)
         {
-            SYS_ERROR_CHECK(err);
-            if(err == ESP_OK)
-            {
-                break;
-            }
-        }
-        if(retry == 1)
-        {
-            SYS_ERROR_CHECK(nvs_flash_erase());
-            err = nvs_flash_init();
+            g_service_param = stored;
+            nvs_close(my_nvs_handle);
+            return;
         }
     }
+    else if(err == ESP_OK && stored_size == sizeof(service_param_v5_t))
+    {
+        service_param_v5_t old = {0};
+        size_t size = sizeof(old);
+        err = nvs_get_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME, &old, &size);
+        if(err != ESP_OK)
+        {
+            SYS_ERROR_CHECK(err);
+            nvs_close(my_nvs_handle);
+            return;
+        }
+        if(err == ESP_OK && size == sizeof(old) &&
+           old.param_ver == SERVICE_PARAM_VER_V5 &&
+           old.sys.factory_flag == SERVICE_FACTORY_DEFAULT_FLAG)
+        {
+            g_service_param = (ServiceParam_Def_t){
+                .param_ver = SERVICE_PARAM_VER,
+                .sys = old.sys,
+                .sleep = old.sleep,
+                .network = old.network,
+            };
+            g_service_param.ble.ble_enable = old.ble_enable;
+
+            /* v5 的自定义后缀单独存放在同一 NVS namespace。缺失时保持空串，
+             * 蓝牙初始化会沿用 MAC 派生的默认名。 */
+            size_t name_size = sizeof(g_service_param.ble.ble_name);
+            if(nvs_get_str(my_nvs_handle, SERVICE_PARAM_V5_BLE_NAME_KEY,
+                           g_service_param.ble.ble_name, &name_size) != ESP_OK)
+            {
+                g_service_param.ble.ble_name[0] = '\0';
+            }
+
+            err = nvs_set_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME,
+                               &g_service_param, sizeof(g_service_param));
+            if(err == ESP_OK) err = nvs_commit(my_nvs_handle);
+            /* 提交失败时必须中止启动：不能以 RAM 中的 v6 当作迁移成功，
+             * 也不能让后续正常保存覆盖仍为 v5 的磁盘数据。 */
+            ESP_ERROR_CHECK(err);
+            nvs_close(my_nvs_handle);
+            return;
+        }
+    }
+
+    /* 未知旧版本、损坏的尺寸或无参数时沿用默认值。 */
+    service_param_set_default();
+    err = nvs_set_blob(my_nvs_handle, SYS_M_NVS_KEY_NAME,
+                       &g_service_param, sizeof(g_service_param));
+    if(err == ESP_OK) err = nvs_commit(my_nvs_handle);
+    SYS_ERROR_CHECK(err);
 
     nvs_close(my_nvs_handle);
 }

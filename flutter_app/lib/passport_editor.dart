@@ -1,12 +1,15 @@
 import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import 'passport_profile.dart';
+import 'passport_avatar_editor.dart';
 import 'passport_storage.dart' as storage;
 
 class PassportEditorController {
   PassportProfile? profile;
+  PassportAvatarEdit? avatarEdit;
   Object? consumedRevision;
   bool initialized = false;
   Future<void> saving = Future.value();
@@ -47,6 +50,8 @@ class _PassportEditorState extends State<PassportEditor> {
   };
   bool _codeUnset = false, _numberUnset = false, _working = false;
   String? _avatar;
+  String _avatarMode = 'mono';
+  PassportAvatarEdit? _avatarEdit;
   String _status = '';
   PassportRaster? _raster;
   int _generation = 0, _editRevision = 0;
@@ -61,6 +66,7 @@ class _PassportEditorState extends State<PassportEditor> {
     codenameUnset: _codeUnset,
     numberUnset: _numberUnset,
     avatar: _avatar,
+    avatarMode: _avatarMode,
   );
   @override
   void initState() {
@@ -78,7 +84,7 @@ class _PassportEditorState extends State<PassportEditor> {
     }
     final saved = widget.controller?.profile;
     if (saved != null) {
-      _replace(saved);
+      _replace(saved, edit: widget.controller?.avatarEdit);
     } else {
       if (!pendingRead) _load();
       _refresh();
@@ -93,10 +99,17 @@ class _PassportEditorState extends State<PassportEditor> {
     try {
       final raw = await (widget.loadDraft ?? storage.loadPassportDraft)();
       if (raw != null) {
-        final profile = PassportProfile.fromJson(raw);
+        final value = jsonDecode(raw);
+        final wrapper = value is Map && value['draftVersion'] == 2;
+        final profile = PassportProfile.fromJson(
+          wrapper ? jsonEncode(value['profile']) : raw,
+        );
+        final edit = wrapper && value['avatarEditor'] != null
+            ? PassportAvatarEdit.fromJson(value['avatarEditor'] as Map)
+            : null;
         final avatar = await validatePassportAvatar(profile);
         avatar?.dispose();
-        if (mounted && revision == _editRevision) _replace(profile);
+        if (mounted && revision == _editRevision) _replace(profile, edit: edit);
       }
     } catch (e) {
       if (mounted) setState(() => _status = '本地草稿读取失败：$e');
@@ -134,8 +147,10 @@ class _PassportEditorState extends State<PassportEditor> {
     }
   }
 
-  void _replace(PassportProfile p) {
+  void _replace(PassportProfile p, {PassportAvatarEdit? edit}) {
     widget.controller?.profile = p;
+    _avatarEdit = p.avatar == null ? null : edit;
+    widget.controller?.avatarEdit = _avatarEdit;
     _editRevision++;
     for (final entry in {
       'codename': p.codename,
@@ -149,13 +164,21 @@ class _PassportEditorState extends State<PassportEditor> {
       _codeUnset = p.codenameUnset;
       _numberUnset = p.numberUnset;
       _avatar = p.avatar;
+      _avatarMode = p.avatarMode;
     });
     _refresh();
   }
 
   void _persist() {
     widget.controller?.profile = _profile;
-    final json = _profile.toJson();
+    widget.controller?.avatarEdit = _avatarEdit;
+    final json = _avatarEdit == null
+        ? _profile.toJson()
+        : jsonEncode({
+            'draftVersion': 2,
+            'profile': jsonDecode(_profile.toJson()),
+            'avatarEditor': _avatarEdit!.toJson(),
+          });
     final save = widget.saveDraft ?? storage.savePassportDraft;
     _saving = (widget.controller?.saving ?? _saving)
         .then((_) => save(json))
@@ -194,14 +217,51 @@ class _PassportEditorState extends State<PassportEditor> {
     try {
       final bytes = await (widget.pickAvatar ?? storage.pickPassportAvatar)();
       if (bytes != null) {
-        final avatar = await cropPassportAvatar(bytes);
-        if (mounted) {
-          _avatar = avatar;
-          _changed();
-        }
+        final source = await prepareAvatarSource(bytes);
+        if (mounted) await _editAvatar(PassportAvatarEdit(source));
       }
     } catch (e) {
       if (mounted) setState(() => _status = '头像导入失败：$e');
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<void> _editAvatar([PassportAvatarEdit? replacement]) async {
+    final edit =
+        replacement ??
+        _avatarEdit ??
+        (_avatar == null ? null : PassportAvatarEdit(_avatar!));
+    if (edit == null) return;
+    final result = await showDialog<({PassportAvatarEdit edit, String png})>(
+      context: context,
+      builder: (_) => PassportAvatarDialog(edit: edit, mode: _avatarMode),
+    );
+    if (mounted && result != null) {
+      _avatarEdit = result.edit;
+      _avatar = result.png;
+      _changed();
+    }
+  }
+
+  Future<void> _changeAvatarMode(String mode) async {
+    if (_avatar == null) {
+      _avatarMode = mode;
+      _changed();
+      return;
+    }
+    setState(() => _working = true);
+    try {
+      final edit = _avatarEdit ?? PassportAvatarEdit(_avatar!);
+      final rendered = await renderAvatarEdit(edit, mode);
+      if (mounted) {
+        _avatarEdit = edit;
+        _avatar = rendered.processed;
+        _avatarMode = mode;
+        _changed();
+      }
+    } catch (e) {
+      if (mounted) setState(() => _status = '头像处理失败：$e');
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -313,8 +373,15 @@ class _PassportEditorState extends State<PassportEditor> {
             TextButton(
               onPressed: _locked || _avatar == null
                   ? null
+                  : () => _editAvatar(),
+              child: const Text('调整头像'),
+            ),
+            TextButton(
+              onPressed: _locked || _avatar == null
+                  ? null
                   : () {
                       _avatar = null;
+                      _avatarEdit = null;
                       _changed();
                     },
               child: const Text('移除头像'),
@@ -322,7 +389,31 @@ class _PassportEditorState extends State<PassportEditor> {
           ],
         ),
         const SizedBox(height: 16),
-        const Text('最终黑白预览 · 440×608'),
+        DropdownButtonFormField<String>(
+          key: ValueKey(_avatarMode),
+          initialValue: _avatarMode,
+          decoration: const InputDecoration(labelText: '头像显示'),
+          items: const [
+            DropdownMenuItem(value: 'mono', child: Text('黑白 · 原有阈值')),
+            DropdownMenuItem(value: 'grayscale', child: Text('灰度 · 黑白网点')),
+            DropdownMenuItem(value: 'color', child: Text('彩色 · 六色')),
+          ],
+          onChanged: _locked
+              ? null
+              : (value) {
+                  _changeAvatarMode(value!);
+                },
+        ),
+        if (_avatar != null)
+          const Text('设备资料只含最终128×160头像；需要重新构图完整画面时，请导入原图。调整弹窗应用后才更新草稿。'),
+        const SizedBox(height: 8),
+        Text(
+          _avatarMode == 'color'
+              ? '设备六色预览 · 彩色慢刷，页面时间静态；需要支持彩色通行证的固件'
+              : _avatarMode == 'grayscale'
+              ? '设备黑白预览 · 灰度通过黑白网点表现'
+              : '最终黑白预览 · 440×608',
+        ),
         Center(
           child: SizedBox(
             width: 330,

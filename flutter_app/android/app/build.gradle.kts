@@ -1,7 +1,29 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val releaseProperties = Properties()
+val releasePropertiesFile = System.getenv("FRAMEFILM_SIGNING_PROPERTIES")
+    ?.let { file(it) } ?: rootProject.file("key.properties")
+if (releasePropertiesFile.isFile) {
+    releasePropertiesFile.inputStream().use { releaseProperties.load(it) }
+}
+val releaseStoreFile = System.getenv("ANDROID_KEYSTORE_PATH") ?: releaseProperties.getProperty("storeFile")
+val releaseStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: releaseProperties.getProperty("storePassword")
+val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: releaseProperties.getProperty("keyAlias")
+val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: releaseProperties.getProperty("keyPassword")
+val hasReleaseSigning = listOf(releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword)
+    .all { !it.isNullOrBlank() }
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.project == project && it.name in listOf("packageRelease", "signReleaseBundle") }) {
+        require(hasReleaseSigning) {
+            "Release requires a distribution keystore. Set ANDROID_KEYSTORE_* / ANDROID_KEY_* or FRAMEFILM_SIGNING_PROPERTIES."
+        }
+    }
 }
 
 android {
@@ -28,15 +50,23 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = file(requireNotNull(releaseStoreFile))
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         debug {
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-dev"
         }
         release {
-            // Temporary debug signing is intentional; this is still a Release/AOT build.
-            // Switch to the stable distribution key when release signing is introduced.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

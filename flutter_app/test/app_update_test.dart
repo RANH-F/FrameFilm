@@ -23,6 +23,43 @@ class UnsupportedAppPlatform implements AppUpdatePlatform {
 }
 
 void main() {
+  testWidgets('preview downloader cancels, retries and prepares installation', (
+    tester,
+  ) async {
+    final controller = AppUpdateController(preview: true);
+    controller.loadDownloadDemo();
+    expect(controller.canDownload, isTrue);
+    await controller.download();
+    await tester.pump(const Duration(milliseconds: 900));
+    expect(controller.state.received, greaterThan(0));
+    expect(controller.canCheck, isFalse);
+    final release = controller.release;
+    controller.loadDownloadDemo();
+    expect(controller.release, same(release));
+    await controller.cancel();
+    expect(controller.state.phase, 'cancelled');
+    expect(controller.canDownload, isTrue);
+    await tester.pump(const Duration(seconds: 7));
+    expect(controller.state.phase, 'cancelled');
+    await controller.download();
+    expect(controller.state.received, 0);
+    await tester.pump(const Duration(seconds: 6));
+    expect(controller.state.phase, 'ready');
+    expect(controller.state.progress, 1);
+    expect(controller.state.canInstall, isTrue);
+    await controller.install();
+    expect(controller.message, contains('未安装应用'));
+    controller.dispose();
+  });
+
+  test('download demo cannot replace a real release outside preview', () {
+    final controller = AppUpdateController();
+    controller.loadDownloadDemo();
+    expect(controller.release, isNull);
+    expect(controller.canDownload, isFalse);
+    controller.dispose();
+  });
+
   const apk = AppUpdateService.apkName;
   const metadata = AppUpdateService.metadataName;
   final sha = 'a' * 64;

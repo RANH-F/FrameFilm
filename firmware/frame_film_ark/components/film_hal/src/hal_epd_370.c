@@ -1188,6 +1188,16 @@ void hal_epd_display_pic(const unsigned char *picData)
     sys_logi(EPD_TAG, "Display pic completed");
 }
 
+void hal_epd_display_native_4bpp(const unsigned char *pixels)
+{
+    if (pixels == NULL) return;
+    EPD_W21_WriteCMD(DTM1);
+    epd_wait_busy(BUSY_TIMEOUT_INIT_MS);
+    for (unsigned i = 0; i < EPD_HEIGHT; ++i)
+        EPD_W21_WriteDATA_Bulk(pixels + i * EPD_INPUT_LINE, EPD_INPUT_LINE);
+    epd_display_refresh_seq();
+}
+
 void hal_epd_display_film(const unsigned char *filmData)
 {
     FilmHeader header;

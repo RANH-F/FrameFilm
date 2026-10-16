@@ -14,6 +14,7 @@ import 'animation_workshop.dart';
 import 'device_files.dart';
 import 'forfilm_theme.dart';
 import 'workbench_widgets.dart';
+import 'workbench_page_transition.dart';
 import 'frame_io.dart' as frame_io;
 import 'frame_quick_page.dart';
 import 'frame_media.dart' as frame_media;
@@ -220,40 +221,43 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
                               onSelected: navigate,
                             ),
                           Expanded(
-                            child: Align(
-                              alignment: Alignment.topCenter,
-                              child: ConstrainedBox(
-                                constraints: BoxConstraints(
-                                  maxWidth: page == 0 ? 720 : 1240,
-                                ),
-                                child: KeyedSubtree(
-                                  key: ValueKey(page),
-                                  child: ListView(
-                                    key: const Key('workbench-content'),
-                                    controller: scrollControllers[page],
-                                    padding: EdgeInsets.all(wide ? 32 : 20),
-                                    children: [
-                                      Text(
-                                        ark
-                                            ? 'TERMINAL / 0${page + 1}'
-                                            : '你的电子纸工作台',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .labelMedium,
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        destinations[page].$1,
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .headlineLarge
-                                            ?.copyWith(
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                      ),
-                                      const SizedBox(height: 24),
-                                      ...pageContent(context),
-                                    ],
+                            child: WorkbenchPageTransition(
+                              index: page,
+                              child: Align(
+                                alignment: Alignment.topCenter,
+                                child: ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxWidth: page == 0 ? 720 : 1240,
+                                  ),
+                                  child: KeyedSubtree(
+                                    key: ValueKey(page),
+                                    child: ListView(
+                                      key: const Key('workbench-content'),
+                                      controller: scrollControllers[page],
+                                      padding: EdgeInsets.all(wide ? 32 : 20),
+                                      children: [
+                                        Text(
+                                          ark
+                                              ? 'TERMINAL / 0${page + 1}'
+                                              : '你的电子纸工作台',
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelMedium,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          destinations[page].$1,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .headlineLarge
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                        ),
+                                        const SizedBox(height: 24),
+                                        ...pageContent(context),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
@@ -1276,9 +1280,10 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
         const Text('自动模式在连接 Ark 后启用明日方舟主题；断连回到 ForFilm。选择仅在本次应用会话内生效。'),
         const SizedBox(height: 20),
         SegmentedButton<FilmTheme>(
+          showSelectedIcon: false,
           segments: const [
             ButtonSegment(value: FilmTheme.automatic, label: Text('自动')),
-            ButtonSegment(value: FilmTheme.forFilm, label: Text('原 ForFilm')),
+            ButtonSegment(value: FilmTheme.forFilm, label: Text('ForFilm')),
             ButtonSegment(value: FilmTheme.arknights, label: Text('明日方舟')),
           ],
           selected: {selectedTheme},
