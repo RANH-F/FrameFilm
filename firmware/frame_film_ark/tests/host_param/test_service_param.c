@@ -176,6 +176,7 @@ int main(void)
     nvs_init();
     assert(g_service_param.param_ver == SERVICE_PARAM_VER);
     assert(g_service_param.network.wifi_enable == 0);
+    assert(g_service_param.sys.led_mode == SERVICE_LED_MODE_AUTO);
     assert(commits == 1);
 
     clear_case();
