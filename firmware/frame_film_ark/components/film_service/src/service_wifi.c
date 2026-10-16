@@ -84,6 +84,8 @@ typedef struct {
     char ssid[33];
     char password[64];
     char url[512];
+    char path[512];
+    bool file;
     bool ota;
     uint32_t size;
     uint8_t sha[32];
@@ -316,18 +318,24 @@ static void wifi_direct_status(uint8_t state, uint8_t error, uint32_t received, 
     portEXIT_CRITICAL(&g_direct_lock);
 }
 
-static uint8_t wifi_direct_start(const char *ssid, const char *password, const char *url, uint32_t size, const uint8_t *sha)
+static uint8_t wifi_direct_start(const char *ssid, const char *password, const char *url,
+                                 const char *path, uint32_t size, const uint8_t *sha)
 {
+    wifi_direct_args_t *args;
     if(!ssid || !password || !url || !ssid[0] ||
        strlen(ssid) > 32 || strlen(password) > 63 || strlen(url) >= 512 ||
        strncmp(url, "http://", 7) != 0)
         return 2;
+    if(path && (!service_file_save_path_valid(path) || strlen(path) >= sizeof(args->path)))
+        return 2;
 
-    wifi_direct_args_t *args = malloc(sizeof(*args));
+    args = malloc(sizeof(*args));
     if(!args) return 3;
     strlcpy(args->ssid, ssid, sizeof(args->ssid));
     strlcpy(args->password, password, sizeof(args->password));
     strlcpy(args->url, url, sizeof(args->url));
+    args->file = path != NULL;
+    if(path) strlcpy(args->path, path, sizeof(args->path));
 
     portENTER_CRITICAL(&g_direct_lock);
     if(g_direct_busy || g_wifi_deinit_running || g_legacy_active)
@@ -361,14 +369,19 @@ static uint8_t wifi_direct_start(const char *ssid, const char *password, const c
 
 uint8_t service_wifi_direct_start(const char *ssid, const char *password, const char *url)
 {
-    return wifi_direct_start(ssid, password, url, 0, NULL);
+    return wifi_direct_start(ssid, password, url, NULL, 0, NULL);
+}
+uint8_t service_wifi_direct_file_start(const char *ssid, const char *password, const char *url, const char *path)
+{
+    if(!path) return 2;
+    return wifi_direct_start(ssid, password, url, path, 0, NULL);
 }
 uint8_t service_wifi_direct_ota_start(const char *ssid, const char *password, const char *url, uint32_t size,
                                       const uint8_t sha[32])
 {
     if(!sha || !size || size > service_ota_direct_max())
         return 2;
-    return wifi_direct_start(ssid, password, url, size, sha);
+    return wifi_direct_start(ssid, password, url, NULL, size, sha);
 }
 uint8_t service_wifi_direct_ota_apply(void)
 {
@@ -404,8 +417,9 @@ static bool wifi_direct_wait_connected(uint32_t timeout_ms, bool allow_cancel)
     return true;
 }
 
-static uint8_t wifi_direct_download(const char *url, uint32_t *received_out, uint32_t *total_out)
+static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *received_out, uint32_t *total_out)
 {
+    const char *url = args->url;
     esp_http_client_config_t cfg = {.url = url, .timeout_ms = 5000};
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if(!client) return WIFI_DIRECT_ERR_RESOURCE;
@@ -420,27 +434,38 @@ static uint8_t wifi_direct_download(const char *url, uint32_t *received_out, uin
         if(esp_http_client_open(client, 0) != ESP_OK) break;
         int64_t length = esp_http_client_fetch_headers(client);
         int status = esp_http_client_get_status_code(client);
-        if(status != 200 || length < 32 || length > UINT32_MAX) break;
+        if(status != 200 || length < (args->file ? 1 : 32) || length > UINT32_MAX) break;
         total = (uint32_t)length;
         *total_out = total;
         wifi_direct_status(WIFI_DIRECT_DOWNLOADING, 0, 0, total);
 
-        const char *start = strrchr(url, '/');
-        start = start ? start + 1 : "direct.film";
-        const char *end = strchr(start, '?');
-        size_t n = end ? (size_t)(end - start) : strlen(start);
-        char filename[128];
-        if(n < 5 || n >= sizeof(filename) ||
-           memcmp(start + n - 5, ".film", 5) != 0)
-            start = "direct.film", n = strlen(start);
-        memcpy(filename, start, n);
-        filename[n] = '\0';
-        if(strchr(filename, '%') || strchr(filename, '\\'))
-            strlcpy(filename, "direct.film", sizeof(filename));
-        if(service_file_save_start(FILE_SAVE_WIFI, filename, total) != 0)
+        if(args->file)
         {
-            error = WIFI_DIRECT_ERR_SAVE;
-            break;
+            if(service_file_save_start_to(FILE_SAVE_WIFI, args->path, total) != 0)
+            {
+                error = WIFI_DIRECT_ERR_SAVE;
+                break;
+            }
+        }
+        else
+        {
+            const char *start = strrchr(url, '/');
+            start = start ? start + 1 : "direct.film";
+            const char *end = strchr(start, '?');
+            size_t n = end ? (size_t)(end - start) : strlen(start);
+            char filename[128];
+            if(n < 5 || n >= sizeof(filename) ||
+               memcmp(start + n - 5, ".film", 5) != 0)
+                start = "direct.film", n = strlen(start);
+            memcpy(filename, start, n);
+            filename[n] = '\0';
+            if(strchr(filename, '%') || strchr(filename, '\\'))
+                strlcpy(filename, "direct.film", sizeof(filename));
+            if(service_file_save_start(FILE_SAVE_WIFI, filename, total) != 0)
+            {
+                error = WIFI_DIRECT_ERR_SAVE;
+                break;
+            }
         }
         saving = true;
         uint32_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
@@ -464,7 +489,7 @@ static uint8_t wifi_direct_download(const char *url, uint32_t *received_out, uin
                          esp_ptr_dma_capable(chunk), ((uintptr_t)chunk & 3u) == 0);
             }
             ++chunk_index;
-            if(header_len < sizeof(header))
+            if(!args->file && header_len < sizeof(header))
             {
                 size_t take = sizeof(header) - header_len;
                 if(take > (size_t)got) take = (size_t)got;
@@ -495,7 +520,7 @@ static uint8_t wifi_direct_download(const char *url, uint32_t *received_out, uin
         }
         if(wifi_direct_cancelled()) error = WIFI_DIRECT_ERR_CANCELLED;
         if(error == WIFI_DIRECT_ERR_CANCELLED || received != total) break;
-        if(service_file_save_stop(FILE_SAVE_WIFI, 1) != 0)
+        if(service_file_save_stop(FILE_SAVE_WIFI, args->file ? 0 : 1) != 0)
         {
             error = WIFI_DIRECT_ERR_SAVE;
             break;
@@ -625,7 +650,7 @@ static void wifi_direct_task(void *arg)
     if(!error && !wifi_direct_wait_connected(25000, true))
         error = wifi_direct_cancelled() ? WIFI_DIRECT_ERR_CANCELLED : WIFI_DIRECT_ERR_CONNECT;
     if(!error) error = args->ota ? wifi_direct_ota_download(args, &received, &total) :
-                                wifi_direct_download(args->url, &received, &total);
+                                wifi_direct_download(args, &received, &total);
 
     wifi_direct_status(WIFI_DIRECT_RESTORING, error, received, total);
     if(wifi_touched && was_initialized)

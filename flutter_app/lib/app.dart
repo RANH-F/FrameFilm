@@ -1076,6 +1076,14 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
         onSave: (json, bin) =>
             device.command('savePassport', {'json': json, 'bin': bin}),
         onCancel: () => device.command('cancelPassport'),
+        onRetry:
+            device.snapshot.connected &&
+                !device.busy &&
+                !device.snapshot.settingsBusy &&
+                !device.snapshot.transfer.active &&
+                !device.snapshot.transfer.canConfirm
+            ? () => device.command('retryPassport')
+            : null,
         onOpen: () => device.command('openDevicePage', {'appId': 6}),
       ),
     ),

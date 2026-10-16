@@ -567,6 +567,7 @@ static bool ble_cmd_conflicts_with_direct(uint8_t ch)
     case BLE_FILM_TRANS_CH_FILE_DATA:
     case BLE_FILM_TRANS_CH_FILE_STOP:
     case BLE_FILM_TRANS_CH_FILE_START:
+    case BLE_FILM_TRANS_CH_DIRECT_FILE_START:
     case BLE_FILM_TRANS_CH_FILE_DELETE:
     case BLE_FILM_TRANS_CH_OTA_LEN:
     case BLE_FILM_TRANS_CH_OTA_DATA:
@@ -609,13 +610,14 @@ static uint8_t ble_direct_start(const ble_cmd_t *cmd)
        (m_ota_trans_state > BLE_OTA_TRANS_IDLE && m_ota_trans_state < BLE_OTA_TRANS_STOPPED)) return 1;
 
     bool ota = cmd->ch == BLE_FILM_TRANS_CH_DIRECT_OTA_START;
+    bool file = cmd->ch == BLE_FILM_TRANS_CH_DIRECT_FILE_START;
     if(ota && cmd->len <= 36) return 2;
     uint32_t size = ota ? ((uint32_t)cmd->pdata[0] << 24) | ((uint32_t)cmd->pdata[1] << 16) |
                          ((uint32_t)cmd->pdata[2] << 8) | cmd->pdata[3] : 0;
     const uint8_t *cursor = cmd->pdata + (ota ? 36 : 0);
     size_t remaining = cmd->len - (ota ? 36 : 0);
-    const char *fields[3];
-    for(size_t i = 0; i < 3; i++)
+    const char *fields[4];
+    for(size_t i = 0; i < (file ? 4 : 3); i++)
     {
         const uint8_t *end = memchr(cursor, '\0', remaining);
         if(end == NULL) return 2;
@@ -626,7 +628,8 @@ static uint8_t ble_direct_start(const ble_cmd_t *cmd)
     }
     if(remaining != 0) return 2;
     return ota ? service_wifi_direct_ota_start(fields[0], fields[1], fields[2], size, &cmd->pdata[4]) :
-                 service_wifi_direct_start(fields[0], fields[1], fields[2]);
+           file ? service_wifi_direct_file_start(fields[0], fields[1], fields[2], fields[3]) :
+                  service_wifi_direct_start(fields[0], fields[1], fields[2]);
 }
 
 /*
@@ -747,7 +750,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CAPABILITIES_GET:
         {
             if(cmd->len != 0) break;
-            const uint8_t capabilities[5] = {1, 0, 0, 0, 1};
+            const uint8_t capabilities[5] = {1, 0, 0, 0, 3};
             service_ble_send_resp(cmd->ch, capabilities, sizeof(capabilities));
             break;
         }
@@ -775,6 +778,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         }
         case BLE_FILM_TRANS_CH_DIRECT_OTA_START:
         case BLE_FILM_TRANS_CH_DIRECT_START:
+        case BLE_FILM_TRANS_CH_DIRECT_FILE_START:
         {
             uint8_t result = ble_direct_start(cmd);
             service_ble_send_resp(cmd->ch, &result, 1);

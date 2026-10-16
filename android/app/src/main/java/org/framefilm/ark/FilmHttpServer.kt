@@ -22,13 +22,19 @@ internal object FilmTransferName {
         return "ark_${id.ifEmpty { "film" }}.film"
     }
 }
-/** Serves one local film through the phone's Wi-Fi Direct GO address. */
-class FilmHttpServer(file: File, fileName: String, address: Inet4Address, firmware: Boolean = false) : Closeable {
+/** Serves one local file through the phone's Wi-Fi Direct GO address. */
+class FilmHttpServer(file: File, fileName: String, address: Inet4Address,
+                     firmware: Boolean = false, generic: Boolean = false) : Closeable {
     private val source = file.also {
-        require(it.isFile && it.length() in 1..0xffffffffL) { "film 文件不存在或大小无效" }
+        require(it.isFile && it.length() in 1..0xffffffffL) { "文件不存在或大小无效" }
     }
     private val length = source.length()
-    private val filename: String = if (firmware) "firmware.bin" else FilmTransferName.forFile(fileName, source)
+    // The requested destination is carried separately in the BLE command. Keep the URL basename fixed.
+    private val filename: String = when {
+        firmware -> "firmware.bin"
+        generic -> "upload.bin"
+        else -> FilmTransferName.forFile(fileName, source)
+    }
     private val server = ServerSocket().apply {
         reuseAddress = true
         bind(InetSocketAddress(address, 0))

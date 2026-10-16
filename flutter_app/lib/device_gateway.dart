@@ -481,6 +481,17 @@ class DeviceController extends ChangeNotifier {
   Future<void> command(String method, [Map<String, Object?>? arguments]) async {
     if (_disposed) return;
     if (method == 'importGeneratedFilm' && !canImportFilm) return;
+    // A failed WiFi passport job may need retry to settle its previous network.
+    // Do not use canEditSettings here: it intentionally blocks unclean transfers.
+    if (method == 'retryPassport' &&
+        (!snapshot.connected ||
+            snapshot.passport['canRetry'] != true ||
+            snapshot.settingsBusy ||
+            snapshot.importing ||
+            snapshot.firmwareDownload.canCancel ||
+            snapshot.transfer.active ||
+            snapshot.transfer.canConfirm))
+      return;
     if (deviceSettingsMethods.contains(method) && !canEditSettings) return;
     final cancellingPassport = method == 'cancelPassport';
     if (snapshot.passportBusy && method != 'snapshot' && !cancellingPassport) {

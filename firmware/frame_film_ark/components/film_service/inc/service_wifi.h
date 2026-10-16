@@ -101,6 +101,7 @@ extern void service_wifi_heartbeat_start(void);
 
 /* Temporary RAM-only WiFi session. No network parameters are persisted. */
 extern uint8_t service_wifi_direct_start(const char *ssid, const char *password, const char *url);
+extern uint8_t service_wifi_direct_file_start(const char *ssid, const char *password, const char *url, const char *path);
 extern uint8_t service_wifi_direct_ota_start(const char *ssid, const char *password, const char *url, uint32_t size, const uint8_t sha[32]);
 extern uint8_t service_wifi_direct_ota_apply(void);
 extern void service_wifi_direct_cancel(void);

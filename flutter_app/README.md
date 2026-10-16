@@ -4,6 +4,14 @@ Flutter 共用界面、Android BLE 桥接与 film / 固件 Wi-Fi Direct 传输�
 
 ## 当前范围
 
+### App 统一 WiFi 上传（当前开发）
+
+Android App 的文件上传统一使用 Wi-Fi Direct：Frame（含批量）、Film 和动画使用既有 film 直传，固件升级使用 WiFi OTA，通行证位图及 JSON 使用新增的指定路径文件直传。BLE 保留连接、控制、状态查询与资料回读。ForFilm 网页上传保持 BLE，未增加 WiFi 上传入口。
+
+通行证要求固件 `0x59` 能力 bit1；不支持时提示先升级固件，不自动退回 BLE。App 依次上传 `app/pass/profile.bin`、`app/pass/profile.json`，逐个等待设备保存与网络清理，再回读 JSON 核对。两文件不是原子事务；中断会显示部分完成状态，“重试上次上传”使用缓存从第一份文件重传。临时文件在替换、成功或退出后释放，进程重启清理遗留缓存。编译与模拟测试不代表真实 WiFi/SD/屏幕验收。
+
+本轮验证：通行证取消、重试和清理未确认时的恢复入口共 3 项 Flutter 测试通过；通行证上传与 Film/OTA 页面隔离测试通过；原始文件 HTTP 字节及路径 host probe 通过；ESP-IDF 5.5.2 固件构建通过。Android 使用当前 Flutter Gradle wrapper 检查 arm64 Kotlin 编译，未打包或安装 APK。实机仍需同时更新 App 与固件后验证两文件上传、取消与重试。
+
 - 六页：连接、Frame、Film、动画、通行证、设置。
 - 两套视觉：原 ForFilm 暖色圆角、明日方舟 PRTS 炭灰黑白冷蓝。
 - 默认自动模式：离线显示 ForFilm，Ark GATT 就绪后切主题并播放一次过场。名称后续回包不会重播；断连立即取消。明确选择 ForFilm 时保持该外观。

@@ -6,6 +6,53 @@ import 'package:framefilm_ark/device_gateway.dart';
 import 'widget_test.dart' show FakeGateway, openPage;
 
 void main() {
+  testWidgets('passport WiFi progress does not replace Film or OTA status', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(500, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final gateway = FakeGateway();
+    addTearDown(gateway.events.close);
+    await tester.pumpWidget(FrameFilmApp(gateway: gateway));
+    gateway.events.add(
+      DeviceSnapshot.fromMap({
+        'connected': true,
+        'passport': {
+          'phase': 'sending',
+          'canCancel': true,
+          'message': 'passport-wifi-upload',
+        },
+        'transfer': {
+          'kind': 'file',
+          'phase': 'downloading',
+          'canCancel': true,
+          'message': 'file-transfer-internal',
+          'received': 50,
+          'total': 100,
+        },
+      }),
+    );
+    await tester.pump(const Duration(seconds: 2));
+    for (final page in ['Film', '设置']) {
+      await openPage(tester, page);
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('transfer-phase')),
+        300,
+        scrollable: find
+            .descendant(
+              of: find.byKey(const Key('workbench-content')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      expect(find.text('file-transfer-internal'), findsNothing);
+      expect(find.text('passport-wifi-upload'), findsNothing);
+      expect(find.byKey(const Key('transfer-progress')), findsNothing);
+    }
+    await tester.pumpWidget(const SizedBox());
+  });
   for (final kind in ['firmware', 'film']) {
     for (final phase in ['downloading', 'done', 'cancelled', 'unconfirmed']) {
       testWidgets('$kind $phase stays on its own transfer page', (

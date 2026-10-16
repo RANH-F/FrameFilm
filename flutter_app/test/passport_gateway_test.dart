@@ -48,7 +48,7 @@ void main() {
     },
   );
   testWidgets(
-    'cancel retains draft input and reconnect allows fresh simulated save/read',
+    'WiFi cancel retains connection and retries the previous passport upload',
     (tester) async {
       final gateway = PreviewDeviceGateway(
         stepDuration: const Duration(milliseconds: 10),
@@ -69,11 +69,9 @@ void main() {
       await controller.command('cancelPassport');
       await tester.pump(const Duration(milliseconds: 100));
       expect(controller.snapshot.passport['phase'], 'cancelled');
-      expect(controller.snapshot.connected, false);
-      await tester.pump();
-      await controller.command('connect');
-      await tester.pump();
-      await controller.command('savePassport', {'json': document, 'bin': bin});
+      expect(controller.snapshot.connected, true);
+      expect(controller.snapshot.passport['canRetry'], true);
+      await controller.command('retryPassport');
       await tester.pump(const Duration(milliseconds: 50));
       expect(controller.snapshot.passport['phase'], 'done');
       final revision = controller.snapshot.passport['revision'] as int;
@@ -84,6 +82,35 @@ void main() {
       gateway.reset();
       await tester.pump();
       expect(controller.snapshot.passport, isEmpty);
+    },
+  );
+  testWidgets(
+    'passport retry can settle an unclean file transfer without enabling unrelated writes',
+    (tester) async {
+      final gateway = Gateway();
+      final controller = DeviceController(gateway);
+      addTearDown(() {
+        controller.dispose();
+        gateway.events.close();
+      });
+      gateway.events.add(
+        DeviceSnapshot.fromMap({
+          'connected': true,
+          'passport': {'phase': 'error', 'canRetry': true},
+          'transfer': {
+            'kind': 'file',
+            'phase': 'error',
+            'canRetry': true,
+            'cleanupCompleted': false,
+          },
+        }),
+      );
+      await tester.pump();
+      expect(controller.canEditSettings, false);
+      await controller.command('savePassport');
+      expect(gateway.calls, ['snapshot']);
+      await controller.command('retryPassport');
+      expect(gateway.calls.last, 'retryPassport');
     },
   );
 }
