@@ -1314,11 +1314,16 @@ int service_file_save_start(file_save_owner_t owner, const char *pfilename, uint
     return result;
 }
 
+bool service_file_save_path_valid(const char *rel_path)
+{
+    return rel_path != NULL && rel_path[0] != '\0' && rel_path[0] != '/' &&
+           strchr(rel_path, '\\') == NULL && strstr(rel_path, "..") == NULL &&
+           strlen(rel_path) + sizeof("/sdcard/.ffupload.part") < sizeof(m_file_state.save_part_path);
+}
+
 int service_file_save_start_to(file_save_owner_t owner, const char *rel_path, uint32_t file_size)
 {
-    if(rel_path == NULL || rel_path[0] == '\0' || rel_path[0] == '/' ||
-       strchr(rel_path, '\\') || strstr(rel_path, "..") != NULL ||
-       strlen(rel_path) + sizeof("/sdcard/.ffupload.part") >= sizeof(m_file_state.save_part_path))
+    if(!service_file_save_path_valid(rel_path))
     {
         sys_logw(FILE_TAG, "Invalid explicit path: %s", rel_path ? rel_path : "(null)");
         return -1;

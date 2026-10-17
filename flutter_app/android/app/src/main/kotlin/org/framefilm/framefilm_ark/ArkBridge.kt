@@ -40,7 +40,8 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         mkdirs()
         // Once per process: a previous process cannot still serve these cached files.
         if (!cacheInitialized) {
-            listFiles()?.filter { it.isFile && it.name.startsWith("import-") }?.forEach { it.delete() }
+            listFiles()?.filter { it.isFile && (it.name.startsWith("import-") ||
+                it.name.startsWith("passport-")) }?.forEach { it.delete() }
             cacheInitialized = true
         }
     }
@@ -58,6 +59,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private var importing = false
     private var importResult: MethodChannel.Result? = null
     private var transferPermission = false
+    private var passportPermission = false
     private var transfer = TransferSnapshot("idle", "请导入 film 文件", cleanupCompleted = true)
     private var connected = false
     private var message = "请扫描并连接 Ark"
@@ -89,6 +91,9 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private var currentFileId: Int? = null
     private var filesMessage = "刷新设备当前目录"
     private var pending: Read? = null
+    private data class PassportFiles(val bin: File, val json: File, val expected: String, val color: Boolean) {
+        fun delete() { bin.delete(); json.delete() }
+    }
     private class PassportJob(val result: MethodChannel.Result, val expected: String? = null) {
         val bytes = java.io.ByteArrayOutputStream()
         var total = -1
@@ -96,8 +101,13 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         var filesStarted = false
         var jsonDone = false
         var retries = 0
+        var awaitingFile = false
+        var fileIndex = 0
+        var cancelRequested = false
+        var interrupted: String? = null
     }
     private var passportJob: PassportJob? = null
+    private var passportFiles: PassportFiles? = null
     private var passportJson: String? = null
     private var passportRevision = 0
     private var passportPhase = "idle"
@@ -114,13 +124,19 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private fun passportState(): Map<String, Any?> = mapOf(
         "phase" to passportPhase, "completed" to passportCompleted, "total" to passportTotal,
         "message" to passportMessage, "canCancel" to (passportJob != null),
+        "canRetry" to (passportJob == null && passportPhase in setOf("error", "cancelled") &&
+            passportFiles?.let { it.bin.isFile && it.json.isFile } == true),
         "json" to passportJson, "revision" to passportRevision)
 
     private val session: ArkSession = ArkSession(activity, object : ArkSession.Listener {
         override fun onTransfer(snapshot: TransferSnapshot) {
             transfer = snapshot
+            if (snapshot.kind == "file") onPassportTransfer(snapshot)
             if (closed) {
-                if (snapshot.phase in setOf("done", "cancelled", "error", "unconfirmed")) { deleteCurrent(); deleteFirmware() }
+                if (snapshot.phase in setOf("done", "cancelled", "error", "unconfirmed")) {
+                    deleteCurrent(); deleteFirmware()
+                    if (passportJob?.awaitingFile != true) deletePassportFiles()
+                }
                 return
             }
             emit()
@@ -139,6 +155,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
             connected = ready
             message = state
             if (!ready) {
+                passportJob?.takeIf { it.awaitingFile }?.interrupted = state
                 clearRead("disconnected", state)
                 clearDetails()
             }
@@ -302,11 +319,21 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "listDeviceFiles", "displayDeviceFile", "deleteDeviceFile", "setDeviceFileDirectory", "playAnimation" -> filesCommand(call, result)
                 "readPassport" -> beginPassport(result)
                 "savePassport" -> savePassport(call, result)
+                "retryPassport" -> retryPassport(result)
                 "cancelPassport" -> {
-                    if (passportJob != null) {
-                        finishPassport("cancelled", "操作已取消")
-                        pending?.timeout?.let(main::removeCallbacks); pending = null
-                        session.disconnect(); connected = false; clearDetails()
+                    passportJob?.let { job ->
+                        job.cancelRequested = true
+                        passportMessage = "正在取消通行证操作并清理传输"; emit()
+                        if (job.awaitingFile) session.cancelTransfer()
+                        else {
+                            val hadPendingRead = pending != null
+                            pending?.timeout?.let(main::removeCallbacks); pending = null
+                            finishPassport("cancelled", "操作已取消")
+                            if (hadPendingRead) {
+                                // A late 0x53/0x59 reply must not satisfy a later read.
+                                session.disconnect(); connected = false; clearDetails()
+                            }
+                        }
                     }
                     emit(); result.success(snapshot())
                 }
@@ -415,6 +442,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         val missing = requested.filter { activity.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isEmpty()) { action(); return }
         if (permissionResult != null) {
+            passportPermission = false
             result.error("busy", "请先完成蓝牙权限授权", null)
             return
         }
@@ -425,6 +453,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         catch (error: Exception) {
             permissionResult = null
             permissionAction = null
+            transferPermission = false
             throw error
         }
     }
@@ -439,14 +468,15 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         if (closed || result == null) return true
         if (grantResults.isEmpty() || grantResults.any { it != PackageManager.PERMISSION_GRANTED }) {
             message = "需要附近设备 / Wi-Fi 或定位权限，请允许后重试"
-            if (transferPermission) transfer = TransferSnapshot("error", message,
+            if (transferPermission && !passportPermission) transfer = TransferSnapshot("error", message,
                 total = currentFile?.length() ?: 0, canRetry = currentFile != null,
                 cleanupCompleted = transfer.cleanupCompleted)
             transferPermission = false
+            passportPermission = false
             emit()
             result.error("permission_denied", message, null)
         } else {
-            try { action?.invoke() }
+            try { transferPermission = false; passportPermission = false; action?.invoke() }
             catch (error: Exception) { result.error("operation_failed", error.message, null) }
         }
         return true
@@ -553,10 +583,12 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
 
     private fun clearRead(code: String, detail: String) {
         fileListing = false
-        if (passportJob != null) finishPassport("error", detail)
+        passportJob?.let { job ->
+            if (job.awaitingFile) job.interrupted = detail else finishPassport("error", detail)
+        }
         pending?.timeout?.let(main::removeCallbacks)
         pending = null
-        refreshing = false
+        refreshing = passportJob != null
         val result = refreshResult
         refreshResult = null
         result?.error(code, detail, null)
@@ -704,14 +736,20 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "$detail；资料文件未发送，原资料保留。"
             } else {
                 val progress = when {
-                    job.jsonDone -> "两个文件已发送，但资料回读未确认，位图未校验。"
-                    job.binDone -> "profile.bin 已发送，profile.json 未确认完成。"
+                    job.jsonDone -> "两个文件已确认保存，但资料回读未确认，位图未校验。"
+                    job.binDone -> "profile.bin 已确认保存，profile.json 未确认完成。"
                     else -> "profile.bin 未确认完成，profile.json 尚未发送。"
                 }
-                "$detail。$progress 请重新连接后从头重试。"
+                "$detail。$progress 可从头重试。"
             }
         } else if (phase != "done") "$detail；之前读取的资料保留。" else detail
+        if (closed || (phase == "done" && job.expected != null)) deletePassportFiles()
         emit(); job.result.success(snapshot())
+    }
+
+    private fun deletePassportFiles() {
+        passportFiles?.delete()
+        passportFiles = null
     }
 
     private fun be32(value: Int) = byteArrayOf((value ushr 24).toByte(), (value ushr 16).toByte(),
@@ -778,71 +816,109 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
             (b ushr 4) in colorCodes && (b and 15) in colorCodes
         }) { "彩色资料包含无效颜色编码" }
         val json = raw.toByteArray(Charsets.UTF_8)
-        val job = PassportJob(result, raw)
+        passportPermission = true
+        withPermissions(result, direct = true) {
+            passportPermission = false
+            val binFile = File.createTempFile("passport-bin-", ".bin", cache)
+            var jsonFile: File? = null
+            val files: PassportFiles
+            try {
+                binFile.writeBytes(bin)
+                val createdJson = File.createTempFile("passport-json-", ".json", cache)
+                jsonFile = createdJson
+                createdJson.writeBytes(json)
+                files = PassportFiles(binFile, createdJson, raw, color)
+            } catch (error: Exception) {
+                binFile.delete(); jsonFile?.delete()
+                throw error
+            }
+            deletePassportFiles()
+            passportFiles = files
+            startPassportSave(result, files)
+        }
+    }
+
+    private fun retryPassport(result: MethodChannel.Result) {
+        val files = checkNotNull(passportFiles) { "没有可重试的通行证文件" }
+        check(passportJob == null && !refreshing && !importing && !session.transferActive &&
+            !transferPermission && !transfer.canConfirm && connected && session.isReady) { "请先连接 Ark 并等待当前操作结束" }
+        check(files.bin.isFile && files.json.isFile) { "通行证缓存已失效，请重新保存" }
+        passportPermission = true
+        withPermissions(result, direct = true) {
+            passportPermission = false
+            startPassportSave(result, files)
+        }
+    }
+
+    private fun startPassportSave(result: MethodChannel.Result, files: PassportFiles) {
+        if (!connected || !session.isReady || session.transferActive) {
+            passportPhase = "error"; passportMessage = "请先连接 Ark 并等待当前操作结束"
+            emit(); result.error("busy", passportMessage, null)
+            return
+        }
+        val job = PassportJob(result, files.expected)
         passportJob = job; refreshing = true; passportPhase = "sending"
-        passportCompleted = 0; passportTotal = bin.size + json.size
-        passportMessage = if (color) "正在查询彩色通行证能力" else "正在发送 profile.bin"; emit()
-        if (color) {
-            request(0x59) { capabilities ->
-                if (passportJob !== job) return@request
-                if (capabilities.size != 5 || capabilities[0].toInt() != 1 || (u32(capabilities, 1) and 1L) == 0L) {
-                    finishPassport("error", "设备不支持彩色通行证，请升级固件；未发送资料文件")
-                } else uploadPassport(job, bin, json)
-            }
-            pending?.let { read ->
-                read.timeout?.let(main::removeCallbacks)
-                read.timeout = Runnable {
-                    if (pending === read) {
-                        pending = null
-                        finishPassport("error", "设备未响应彩色能力查询，请升级固件；未发送资料文件")
-                    }
-                }.also { main.postDelayed(it, 5000) }
-            }
-        } else uploadPassport(job, bin, json)
-    }
-
-    private fun uploadPassport(job: PassportJob, bin: ByteArray, json: ByteArray) {
-        if (passportJob !== job) return
-        job.filesStarted = true
-        passportMessage = "正在发送 profile.bin"; emit()
-        uploadPassportFile(job, "app/pass/profile.bin", bin, 0) {
-            job.binDone = true; passportMessage = "profile.bin 已发送，正在发送 profile.json"; emit()
-            main.postDelayed({ if (passportJob === job) uploadPassportFile(job, "app/pass/profile.json", json, bin.size) {
-                job.jsonDone = true; passportPhase = "verifying"
-                passportMessage = "文件已发送，正在回读资料；协议无保存 ACK"; emit()
-                main.postDelayed({ if (passportJob === job) readPassportChunk(job) }, 750)
-            } }, 750)
+        passportCompleted = 0; passportTotal = (files.bin.length() + files.json.length()).toInt()
+        passportMessage = "正在查询通行证 Wi-Fi 传输能力"; emit()
+        request(0x59) { capabilities ->
+            if (passportJob !== job || job.cancelRequested) return@request
+            if (capabilities.size != 5 || capabilities[0].toInt() != 1 ||
+                (u32(capabilities, 1) and 2L) == 0L) {
+                finishPassport("error", "设备不支持通行证 Wi-Fi 上传，请升级固件")
+            } else if (files.color && (u32(capabilities, 1) and 1L) == 0L) {
+                finishPassport("error", "设备不支持彩色通行证，请升级固件")
+            } else startPassportFile(job, files, 0)
+        }
+        pending?.let { read ->
+            read.timeout?.let(main::removeCallbacks)
+            read.timeout = Runnable {
+                if (pending === read) {
+                    pending = null
+                    finishPassport("error", "设备未响应通行证 Wi-Fi 能力查询，请升级固件")
+                }
+            }.also { main.postDelayed(it, 5000) }
         }
     }
 
-    private fun passportWrite(job: PassportJob, channel: Int, payload: ByteArray, next: () -> Unit) {
-        if (passportJob !== job || closed) return
-        val marker = Read(channel); pending = marker
-        marker.timeout = Runnable { if (pending === marker) failRead("timeout", "蓝牙写入超时") }
-            .also { main.postDelayed(it, 7000) }
-        session.writePacket(packet(channel, payload)) { outcome ->
-            if (passportJob !== job || pending !== marker || closed) return@writePacket
-            marker.timeout?.let(main::removeCallbacks); pending = null
-            outcome.fold(onSuccess = {
-                main.postDelayed({ if (passportJob === job) next() }, if (channel == 0x02) 4L else 50L)
-            }, onFailure = { failRead("write_failed", it.message ?: "蓝牙写入失败") })
+    private fun startPassportFile(job: PassportJob, files: PassportFiles, index: Int) {
+        if (passportJob !== job || job.cancelRequested || closed) return
+        if (!connected || !session.isReady) {
+            finishPassport("error", "蓝牙已断开")
+            return
         }
+        job.filesStarted = true; job.fileIndex = index; job.awaitingFile = true
+        val filename = if (index == 0) "profile.bin" else "profile.json"
+        passportMessage = "正在发送 $filename"; emit()
+        session.startFileTransfer(if (index == 0) files.bin else files.json, "app/pass/$filename")
     }
 
-    private fun uploadPassportFile(job: PassportJob, path: String, bytes: ByteArray, base: Int, done: () -> Unit) {
-        fun chunk(offset: Int) {
-            if (offset == bytes.size) {
-                passportWrite(job, 0x04, byteArrayOf(), done); return
-            }
-            val end = minOf(offset + 192, bytes.size)
-            passportWrite(job, 0x02, bytes.copyOfRange(offset, end)) {
-                passportCompleted = base + end; emit(); chunk(end)
-            }
+    private fun onPassportTransfer(snapshot: TransferSnapshot) {
+        val job = passportJob ?: return
+        if (!job.awaitingFile) return
+        val files = passportFiles ?: return
+        val base = if (job.fileIndex == 0) 0 else files.bin.length().toInt()
+        val size = if (job.fileIndex == 0) files.bin.length() else files.json.length()
+        passportCompleted = base + snapshot.received.coerceIn(0, size).toInt()
+        if (snapshot.phase !in setOf("done", "cancelled", "error", "unconfirmed")) {
+            passportMessage = "正在发送 ${if (job.fileIndex == 0) "profile.bin" else "profile.json"}：${snapshot.message}"
+            return
         }
-        passportWrite(job, 0x03, byteArrayOf()) {
-            passportWrite(job, 0x00, path.toByteArray(Charsets.US_ASCII) + byteArrayOf(0)) {
-                passportWrite(job, 0x01, be32(bytes.size)) { chunk(0) }
-            }
+        job.awaitingFile = false
+        if (job.cancelRequested) {
+            finishPassport("cancelled", if (snapshot.cleanupCompleted) "操作已取消" else "取消后设备清理未确认：${snapshot.message}")
+        } else if (job.interrupted != null || !connected || !session.isReady) {
+            finishPassport("error", "连接中断：${job.interrupted ?: snapshot.message}")
+        } else if (snapshot.phase != "done" || !snapshot.success || !snapshot.cleanupCompleted) {
+            finishPassport("error", "${if (job.fileIndex == 0) "profile.bin" else "profile.json"} 上传失败：${snapshot.message}")
+        } else if (job.fileIndex == 0) {
+            job.binDone = true; passportCompleted = files.bin.length().toInt()
+            passportMessage = "profile.bin 已确认保存，正在准备 profile.json"
+            main.post { if (passportJob === job && !job.cancelRequested) startPassportFile(job, files, 1) }
+        } else {
+            job.jsonDone = true; passportCompleted = passportTotal
+            passportPhase = "verifying"
+            passportMessage = "两个文件已确认保存，正在通过 BLE 回读资料"; emit()
+            main.postDelayed({ if (passportJob === job && !job.cancelRequested) readPassportChunk(job) }, 750)
         }
     }
 
@@ -1467,6 +1543,8 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         permissionResult?.error("closed", "蓝牙会话已关闭", null)
         permissionResult = null
         permissionAction = null
+        transferPermission = false
+        passportPermission = false
         methods.setMethodCallHandler(null)
         events.setStreamHandler(null)
         sink = null
@@ -1474,8 +1552,12 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         importResult = null
         worker.shutdownNow()
         val active = session.transferActive
+        if (passportJob?.awaitingFile == true) {
+            passportJob?.cancelRequested = true
+            session.cancelTransfer()
+        }
         session.close()
-        if (!active) { deleteCurrent(); deleteFirmware() }
+        if (!active) { deleteCurrent(); deleteFirmware(); deletePassportFiles() }
     }
 
     private companion object {

@@ -7,7 +7,7 @@
 - `api/` - API 接口文档
 - `design/` - 设计文档和原型图
 - `user-guide/` - 用户使用手册
-- `development/` - 开发文档
+- `ci-builds.md` - Ark 自动构建与发布说明
 
 ## 文档说明
 

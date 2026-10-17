@@ -307,7 +307,6 @@ Future<PassportRaster> renderPassport(PassportProfile p) async {
     txt('未设置头像', 52, 227, 13, 700);
   }
   line(20, 308, 148, 308);
-  txt('头像 / 128×160', 20, 325, 12, 600);
   chip('代号', 173, 143, 65);
   txt(p.codename.trim().isEmpty ? '未设置' : p.codename.trim(), 173, 204, 29, 700);
   line(173, 220, 420, 220);

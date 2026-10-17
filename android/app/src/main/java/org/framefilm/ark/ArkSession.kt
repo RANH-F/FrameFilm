@@ -18,7 +18,8 @@ class ArkSession(context: Context, private val listener: Listener) {
 
     private data class QueuedWrite(val channel: Int, val payload: ByteArray,
                                    val callback: (Result<Unit>) -> Unit)
-    private data class TransferInput(val file: File, val fileName: String, val firmware: ArkFirmware? = null)
+    private data class TransferInput(val file: File, val fileName: String,
+                                     val firmware: ArkFirmware? = null, val targetPath: String? = null)
 
     private val main = Handler(Looper.getMainLooper())
     private val appContext = context.applicationContext
@@ -66,10 +67,11 @@ class ArkSession(context: Context, private val listener: Listener) {
     fun scannedName(address: String): String? = ble.scannedName(address)
     val transferActive: Boolean get() = pendingStart != null || settling || coordinator?.isActive == true
 
-    private fun publishTransfer(snapshot: TransferSnapshot) {
-        val image = lastInput?.firmware
-        listener.onTransfer(if (image == null) snapshot else snapshot.copy(kind = "firmware",
-            targetVersion = image.version, targetBuild = image.elfSha256))
+    private fun publishTransfer(snapshot: TransferSnapshot, input: TransferInput? = lastInput) {
+        val image = input?.firmware
+        listener.onTransfer(snapshot.copy(
+            kind = when { input?.targetPath != null -> "file"; image != null -> "firmware"; else -> "film" },
+            targetVersion = image?.version, targetBuild = image?.elfSha256))
     }
 
     private fun onMain(block: () -> Unit) {
@@ -176,7 +178,7 @@ class ArkSession(context: Context, private val listener: Listener) {
                     }, input.firmware, reconnect = {
                         val device = connectedDevice
                         if (!closed && !closing && device != null) ble.connect(device)
-                    })
+                    }, targetPath = input.targetPath)
                 coordinator = next
                 next.start()
             }
@@ -188,12 +190,16 @@ class ArkSession(context: Context, private val listener: Listener) {
 
     fun startFirmwareTransfer(file: File, firmware: ArkFirmware) = startInput(file, "firmware.bin", firmware)
 
+    /** Transfer raw bytes to a path relative to the Ark SD-card root. */
+    fun startFileTransfer(file: File, targetPath: String) = startInput(file, file.name, null, targetPath)
+
     fun confirmFirmwareTransfer() = onMain { coordinator?.confirmFirmware() }
 
-    private fun startInput(file: File, fileName: String, firmware: ArkFirmware?) = onMain {
+    private fun startInput(file: File, fileName: String, firmware: ArkFirmware?, targetPath: String? = null) = onMain {
+        val input = TransferInput(file, fileName, firmware, targetPath)
         if (closed || closing) {
             publishTransfer(TransferSnapshot("error", "会话已关闭",
-                cleanupCompleted = coordinator?.cleanupConfirmed ?: true))
+                cleanupCompleted = coordinator?.cleanupConfirmed ?: true), input)
             return@onMain
         }
         if (transferActive || coordinator?.needsConfirmation == true) {
@@ -201,11 +207,16 @@ class ArkSession(context: Context, private val listener: Listener) {
             return@onMain
         }
         if (!file.isFile || file.length() !in 1..0xffffffffL) {
-            publishTransfer(TransferSnapshot("error", if (firmware == null) "film 文件不存在或大小无效" else "固件文件不存在或大小无效",
-                cleanupCompleted = coordinator?.cleanupConfirmed ?: true))
+            publishTransfer(TransferSnapshot("error", when { targetPath != null -> "文件不存在或大小无效";
+                firmware != null -> "固件文件不存在或大小无效"; else -> "film 文件不存在或大小无效" },
+                cleanupCompleted = coordinator?.cleanupConfirmed ?: true), input)
             return@onMain
         }
-        val input = TransferInput(file, fileName, firmware)
+        if (targetPath != null && !FileTransferPath.isValid(targetPath)) {
+            publishTransfer(TransferSnapshot("error", "目标路径须为非空 ASCII SD 相对路径，不能包含 .、.. 或反斜杠",
+                cleanupCompleted = coordinator?.cleanupConfirmed ?: true), input)
+            return@onMain
+        }
         lastInput = input
         if (!ble.isReady) {
             publishTransfer(TransferSnapshot("error", "请先连接 Ark", total = file.length(),
@@ -232,9 +243,9 @@ class ArkSession(context: Context, private val listener: Listener) {
     fun retryTransfer() = onMain {
         val input = lastInput
         if (input == null || !input.file.isFile) {
-            publishTransfer(TransferSnapshot("error", "没有可重试的本地 film 文件",
+            publishTransfer(TransferSnapshot("error", "没有可重试的本地文件",
                 cleanupCompleted = coordinator?.cleanupConfirmed ?: true))
-        } else startInput(input.file, input.fileName, input.firmware)
+        } else startInput(input.file, input.fileName, input.firmware, input.targetPath)
     }
 
     private fun failQueuedWrites(message: String) {
@@ -246,7 +257,11 @@ class ArkSession(context: Context, private val listener: Listener) {
         closing = true
         failQueuedWrites("会话已关闭")
         if (settling) { cancelAfterSettle = true; return@onMain }
-        if (pendingStart != null) pendingStart = null
+        pendingStart?.let { pending ->
+            pendingStart = null
+            publishTransfer(TransferSnapshot("cancelled", "会话关闭前已取消直传", total = pending.file.length(),
+                cleanupCompleted = coordinator?.cleanupConfirmed ?: true), pending)
+        }
         val attempt = coordinator
         if (attempt?.needsConfirmation == true) finishClose()
         else if (attempt?.isActive == true) attempt.cancel()

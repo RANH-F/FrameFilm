@@ -1,6 +1,7 @@
 #ifndef __SERVICE_FILE_H__
 #define __SERVICE_FILE_H__
 
+#include <stdbool.h>
 
 /*********************************************************************
  * INCLUDES
@@ -165,6 +166,9 @@ extern int service_file_save_data(file_save_owner_t owner, uint8_t *pdata, uint3
  * @return int 0:成功, -1:失败
  */
 extern int service_file_save_start(file_save_owner_t owner, const char *pfilename, uint32_t file_size);
+
+/** 校验相对 /sdcard 的显式目标路径。 */
+extern bool service_file_save_path_valid(const char *rel_path);
 
 /**
  * @brief 开始保存文件到显式相对路径

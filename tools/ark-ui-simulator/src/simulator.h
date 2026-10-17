@@ -10,4 +10,12 @@ const app_entry_t *simulator_current_entry(void);
 const app_ui_ops_t *simulator_current_ops(void);
 int simulator_take_boot_done(void);
 
+typedef struct {
+    int calls;
+    int x, y, w, h;
+} simulator_color_card_t;
+
+void simulator_reset_color_card(void);
+simulator_color_card_t simulator_color_card(void);
+
 #endif

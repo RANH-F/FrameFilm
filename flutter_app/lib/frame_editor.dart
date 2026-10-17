@@ -47,6 +47,8 @@ const frameAlgorithmLabels = {
   FrameAlgorithm.colorQual: 'ColorQual · 46 色',
   FrameAlgorithm.szEnhanced: 'SZ 增强',
   FrameAlgorithm.atkinsonSzCalib: 'Atkinson SZ 校色',
+  FrameAlgorithm.colorQualMeasured: '实测校色 · 原值',
+  FrameAlgorithm.colorQualCalibrated: '实测校色 · 校正 2.5%',
 };
 
 class FrameEditor extends StatefulWidget {
@@ -208,9 +210,7 @@ class _FrameEditorState extends State<FrameEditor> {
       c.revision++;
       c.crop = null;
       _working = false;
-      _status = c.source == null
-          ? '参数已更新，请上传图像以生成预览'
-          : '参数已更新，正在更新预览';
+      _status = c.source == null ? '参数已更新，请上传图像以生成预览' : '参数已更新，正在更新预览';
     });
     _previewTimer?.cancel();
     if (c.source != null) {
@@ -340,7 +340,9 @@ class _FrameEditorState extends State<FrameEditor> {
         o.dither ||
         o.format != FrameFormat.sixColor ||
         o.algorithm == FrameAlgorithm.colorFast55 ||
-        o.algorithm == FrameAlgorithm.colorQual;
+        o.algorithm == FrameAlgorithm.colorQual ||
+        o.algorithm == FrameAlgorithm.colorQualMeasured ||
+        o.algorithm == FrameAlgorithm.colorQualCalibrated;
     final png = devicePreview
         ? (c.hasCurrentResult ? c.result!.png : null)
         : c.crop;
@@ -379,6 +381,8 @@ class _FrameEditorState extends State<FrameEditor> {
           FrameAlgorithm.jarvis,
           FrameAlgorithm.gammaFloydSteinberg,
           FrameAlgorithm.bayer,
+          FrameAlgorithm.colorQualMeasured,
+          FrameAlgorithm.colorQualCalibrated,
         ].contains(o.algorithm))
           _slider('抖动强度', o.ditherStrength, 0, 5, (v) => _change(strength: v)),
         _slider('对比度', o.contrast, .5, 2, (v) => _change(contrast: v)),
@@ -458,8 +462,13 @@ class _FrameEditorState extends State<FrameEditor> {
         if (o.algorithm == FrameAlgorithm.szEnhanced)
           const Text('SZ 增强使用原图色彩进行校正，启用抖动时不叠加亮度、对比度及饱和度。'),
         if (o.algorithm == FrameAlgorithm.colorFast55 ||
-            o.algorithm == FrameAlgorithm.colorQual)
+            o.algorithm == FrameAlgorithm.colorQual ||
+            o.algorithm == FrameAlgorithm.colorQualMeasured ||
+            o.algorithm == FrameAlgorithm.colorQualCalibrated)
           const Text('46 / 55 色使用 Ark 的 Film 2.0 索引色格式；关闭抖动仍保留对应色板。'),
+        if (o.algorithm == FrameAlgorithm.colorQualMeasured ||
+            o.algorithm == FrameAlgorithm.colorQualCalibrated)
+          const Text('实测校色使用 ColorQual 三相刷新；关闭抖动仍保留实测色板。'),
       ]),
       const SizedBox(height: 16),
       _section('预览', [

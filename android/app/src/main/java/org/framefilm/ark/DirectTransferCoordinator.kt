@@ -15,6 +15,7 @@ class DirectTransferCoordinator(
     private val listener: Listener,
     private val firmware: ArkFirmware? = null,
     private val reconnect: (() -> Unit)? = null,
+    private val targetPath: String? = null,
 ) {
     interface Listener { fun onSnapshot(snapshot: TransferSnapshot) }
 
@@ -29,7 +30,8 @@ class DirectTransferCoordinator(
         override fun onSessionReady(session: ArkP2pController.Session) {
             if (!active || stopping) return
             try {
-                server = FilmHttpServer(file, fileName, session.ownerAddress, firmware != null).also { it.start() }
+                server = FilmHttpServer(file, fileName, session.ownerAddress,
+                    firmware = firmware != null, generic = targetPath != null).also { it.start() }
                 val payload = ByteArrayOutputStream().apply {
                     firmware?.let { image ->
                         for (shift in intArrayOf(24, 16, 8, 0)) write((image.size shr shift).toInt() and 255)
@@ -38,12 +40,14 @@ class DirectTransferCoordinator(
                     write(session.ssid.toByteArray(Charsets.US_ASCII)); write(0)
                     write(session.passphrase.toByteArray(Charsets.US_ASCII)); write(0)
                     write(server!!.url.toByteArray(Charsets.US_ASCII)); write(0)
+                    targetPath?.let { write(it.toByteArray(Charsets.UTF_8)); write(0) }
                 }.toByteArray()
                 if (payload.size > 192) { stop("直传参数超过 BLE 单包上限"); return }
                 // Saving already routes film files by frame count. Do not enter the image
                 // app here: entering it would replay the previous image before upload.
                 startSubmitted = true
-                ble.command(if (firmware == null) 0x50 else 0x57, payload, 8_000) { reply ->
+                val channel = when { targetPath != null -> 0x5A; firmware != null -> 0x57; else -> 0x50 }
+                ble.command(channel, payload, 8_000) { reply ->
                     if (!active || stopping) return@command
                     val code = reply.getOrElse { stop(it.message ?: "直传启动失败"); return@command }
                     if (code.size != 1 || code[0].toInt() != 0) {
@@ -91,13 +95,14 @@ class DirectTransferCoordinator(
         if (active || cleaning) return@onMain
         if (!ble.isReady) { emit("error", "请先连接 Ark", canRetry = true); return@onMain }
         if (!file.isFile || file.length() !in 1..0xffffffffL) {
-            emit("error", if (firmware == null) "film 文件不存在或大小无效" else "固件文件不存在或大小无效", canRetry = false)
+            emit("error", when { targetPath != null -> "文件不存在或大小无效";
+                firmware != null -> "固件文件不存在或大小无效"; else -> "film 文件不存在或大小无效" }, canRetry = false)
             return@onMain
         }
         active = true
         total = file.length()
         deadline = Runnable { stop("直传超过 180 秒") }.also { main.postDelayed(it, 180_000) }
-        emit("preparing", "核对 Ark 屏幕及原有 Wi-Fi 配置")
+        emit("preparing", "核对 Ark 及原有 Wi-Fi 配置")
         if (firmware != null) {
             emit("validating", "核对 Wi-Fi OTA 能力与目标分区")
             ble.command(0x56) { result ->
@@ -113,7 +118,18 @@ class DirectTransferCoordinator(
                     finish("done", "设备已运行相同构建，无需升级", true)
                 } else prepareNetwork()
             }
-        } else prepareNetwork()
+        } else if (targetPath != null) checkFileCapability()
+        else prepareNetwork()
+    }
+
+    private fun checkFileCapability() {
+        ble.command(0x59) { result ->
+            if (!active || stopping) return@command
+            val data = result.getOrElse { stop("无法确认设备支持通用 Wi-Fi 文件传输：${it.message}"); return@command }
+            if (data.size != 5 || (data[0].toInt() and 0xff) != 1 || (data[4].toInt() and 0x02) == 0) {
+                stop("设备固件不支持通用 Wi-Fi 文件传输，请先升级 Ark 固件")
+            } else prepareNetwork()
+        }
     }
 
     private fun prepareNetwork() {
@@ -141,7 +157,7 @@ class DirectTransferCoordinator(
                      success: Boolean = false) {
         listener.onSnapshot(TransferSnapshot(phase, message, received, total,
             canCancel = active && !stopping && !applied, canRetry = canRetry && !applied, cleanupCompleted = cleanupCompleted,
-            success = success, kind = if (firmware == null) "film" else "firmware",
+            success = success, kind = when { targetPath != null -> "file"; firmware != null -> "firmware"; else -> "film" },
             targetVersion = firmware?.version, targetBuild = firmware?.elfSha256,
             canConfirm = awaitingConfirmation && !active))
     }

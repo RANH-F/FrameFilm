@@ -25,6 +25,7 @@ class PassportEditor extends StatefulWidget {
     required this.onSave,
     required this.onCancel,
     required this.onOpen,
+    this.onRetry,
     this.loadDraft,
     this.saveDraft,
     this.pickAvatar,
@@ -36,6 +37,7 @@ class PassportEditor extends StatefulWidget {
   final Future<void> Function() onRead;
   final Future<void> Function(String, Uint8List) onSave;
   final VoidCallback onCancel, onOpen;
+  final Future<void> Function()? onRetry;
   final Future<String?> Function()? loadDraft;
   final Future<void> Function(String)? saveDraft;
   final Future<Uint8List?> Function()? pickAvatar;
@@ -409,7 +411,7 @@ class _PassportEditorState extends State<PassportEditor> {
         const SizedBox(height: 8),
         Text(
           _avatarMode == 'color'
-              ? '设备六色预览 · 彩色慢刷，页面时间静态；需要支持彩色通行证的固件'
+              ? '设备六色预览 · 页面时间静态；新版固件使用 ColorFast 彩色快刷'
               : _avatarMode == 'grayscale'
               ? '设备黑白预览 · 灰度通过黑白网点表现'
               : '最终黑白预览 · 440×608',
@@ -450,8 +452,16 @@ class _PassportEditorState extends State<PassportEditor> {
                       return widget.onSave(json, bin);
                     })
                   : null,
-              child: const Text('从头发送资料'),
+              child: const Text('WiFi 发送资料'),
             ),
+            if (op['canRetry'] == true)
+              OutlinedButton(
+                key: const Key('retry-passport'),
+                onPressed: !_locked && widget.onRetry != null
+                    ? () => _run(widget.onRetry!)
+                    : null,
+                child: const Text('重试上次上传'),
+              ),
             OutlinedButton(
               onPressed: op['canCancel'] == true ? widget.onCancel : null,
               child: const Text('取消'),
@@ -472,7 +482,9 @@ class _PassportEditorState extends State<PassportEditor> {
         if (op['message'] is String) Text(op['message'] as String),
         if (_status.isNotEmpty) Text(_status),
         const SizedBox(height: 8),
-        const Text('先发送 profile.bin，再发送 profile.json。中断后重新连接并从头发送；请在设备上按确认加载。'),
+        const Text(
+          'App 通过 WiFi 直传档案画面和资料，蓝牙用于控制和回读。取消后等待清理完成；重试会从上次上传的第一份文件开始。需要支持 WiFi 文件上传的固件。',
+        ),
       ],
     );
   }

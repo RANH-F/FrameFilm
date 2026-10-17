@@ -9,6 +9,7 @@ import 'package:flutter/gestures.dart';
 import 'frame_algorithms.dart';
 
 const avatarAlgorithms = {
+  'adaptive': '自适应（与 Film 相同）',
   'floydSteinberg': 'Floyd-Steinberg',
   'atkinson': 'Atkinson',
   'bayer': 'Bayer 4×4',
@@ -32,7 +33,7 @@ const avatarDefaults = <String, dynamic>{
   'saturation': 1.0,
   'dither': true,
   'strength': 1.0,
-  'algorithm': 'floydSteinberg',
+  'algorithm': 'adaptive',
 };
 
 class PassportAvatarEdit {
@@ -116,8 +117,9 @@ Future<String> prepareAvatarSource(Uint8List bytes) async {
 
 Future<({String crop, String processed})> renderAvatarEdit(
   PassportAvatarEdit edit,
-  String mode,
-) async {
+  String mode, {
+  void Function()? checkCancelled,
+}) async {
   final o = edit.options;
   final codec = await ui.instantiateImageCodec(
     base64Decode(edit.source.substring(22)),
@@ -168,6 +170,7 @@ Future<({String crop, String processed})> renderAvatarEdit(
       algorithm: FrameAlgorithm.values.byName(o['algorithm'] as String),
       dither: o['dither'] as bool,
       strength: (o['strength'] as num).toDouble(),
+      checkCancelled: checkCancelled,
     );
   } else {
     for (var i = 0; i < rgba.length; i += 4) {
@@ -237,6 +240,11 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
       final result = await renderAvatarEdit(
         PassportAvatarEdit(widget.edit.source, {...options}),
         widget.mode,
+        checkCancelled: () {
+          if (!mounted || g != generation) {
+            throw StateError('头像预览已取消');
+          }
+        },
       );
       if (mounted && g == generation)
         setState(() {
@@ -364,9 +372,17 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
                     (e) => DropdownMenuItem(value: e.key, child: Text(e.value)),
                   )
                   .toList(),
-              onChanged: (v) => change('algorithm', v),
+              onChanged: options['dither'] == true
+                  ? (v) {
+                      if (v != null) change('algorithm', v);
+                    }
+                  : null,
             ),
-            slider('strength', '抖动强度', 0, 3),
+            if (options['dither'] == true)
+              if (options['algorithm'] == 'adaptive')
+                const Text('根据头像细节和色彩自动选择抖动算法与强度。可继续调整构图、亮度和对比度。')
+              else
+                slider('strength', '抖动强度', 0, 3),
           ],
         ),
       ),

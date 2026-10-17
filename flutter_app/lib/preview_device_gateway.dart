@@ -15,6 +15,7 @@ class PreviewDeviceGateway implements DeviceGateway {
   Timer? _passportTimer;
   Map<String, Object?> _passport = const {};
   String? _savedPassport;
+  String? _retryPassport;
   int _passportRevision = 0;
   bool _passportFailed = false;
   bool _disposed = false,
@@ -98,6 +99,7 @@ class PreviewDeviceGateway implements DeviceGateway {
     _passportTimer?.cancel();
     _passport = const {};
     _savedPassport = null;
+    _retryPassport = null;
     _passportFailed = false;
     scenario = value ?? scenario;
     _connected = false;
@@ -181,16 +183,20 @@ class PreviewDeviceGateway implements DeviceGateway {
             utf8.encode(json).length > 350000) {
           throw ArgumentError('通行证文件大小无效');
         }
+        _retryPassport = json;
         _startPassport(json: json);
+      case 'retryPassport':
+        if (_retryPassport == null) throw StateError('没有可重试的通行证上传');
+        _startPassport(json: _retryPassport);
       case 'cancelPassport':
         _passportTimer?.cancel();
         _passport = {
           ..._passport,
           'phase': 'cancelled',
           'canCancel': false,
-          'message': '模拟操作已取消，草稿保留；重新连接后可从头发送。',
+          'canRetry': _retryPassport != null,
+          'message': '模拟上传已取消并完成清理，草稿保留，可重试上次上传。',
         };
-        _connected = false;
       case 'remoteKey':
         final key = arguments!['key'] as int;
         if (key < 0 || key > 4) throw ArgumentError('无效按键');
@@ -247,13 +253,20 @@ class PreviewDeviceGateway implements DeviceGateway {
         if (bytes.length < 32) throw ArgumentError('film 文件头不完整');
         final header = ByteData.sublistView(bytes);
         final format = bytes[9];
-        final body = format == 0
-            ? 172800
+        final width = header.getUint16(6, Endian.little);
+        final height = header.getUint16(4, Endian.little);
+        final frameCount = header.getUint16(10, Endian.little);
+        final frameBody = format == 0
+            ? width * height ~/ 2
             : format == 1
-            ? 43200
+            ? width * height ~/ 8
+            : format == 2 || format == 3
+            ? width * height
             : -1;
-        if (header.getUint16(4, Endian.little) != 720 ||
-            header.getUint16(6, Endian.little) != 480 ||
+        final body = frameBody * (frameCount > 1 ? frameCount : 1);
+        if (height != 720 ||
+            width != 480 ||
+            frameBody < 0 ||
             header.getUint32(0, Endian.little) != body ||
             bytes.length != body + 32) {
           throw ArgumentError('生成的 film 格式无效');
@@ -476,7 +489,8 @@ class PreviewDeviceGateway implements DeviceGateway {
       'completed': 0,
       'total': total,
       'canCancel': true,
-      'message': saving ? '模拟发送通行证' : '模拟读取设备资料',
+      'canRetry': false,
+      'message': saving ? '模拟 WiFi 上传通行证' : '模拟读取设备资料',
       'json': oldJson,
       'revision': _passportRevision,
     };
@@ -497,6 +511,7 @@ class PreviewDeviceGateway implements DeviceGateway {
           ..._passport,
           'phase': 'error',
           'canCancel': false,
+          'canRetry': saving,
           'message': '模拟连接中断，可能只发送了部分文件；草稿保留，重新连接后从头发送。',
         };
         _connected = false;

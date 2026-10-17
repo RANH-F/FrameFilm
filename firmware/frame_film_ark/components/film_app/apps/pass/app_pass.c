@@ -146,10 +146,11 @@ static pass_load_result_t pass_load_card(pass_card_t **out)
 #ifdef ARK_UI_SIMULATOR
     else
     {
-        /* LVGL RGB888 像素的内存字节序是 B,G,R。 */
+        /* ColorFast measured colors selected in ui_display.c; LVGL RGB888
+           pixel memory order is B,G,R. This is a preview, not panel calibration. */
         static const uint8_t bgr[7][3] = {
-            {0, 0, 0}, {255, 255, 255}, {0, 214, 255}, {48, 48, 226},
-            {0, 0, 0}, {207, 79, 32}, {69, 150, 23}
+            {0, 0, 0}, {255, 255, 255}, {57, 198, 219}, {32, 71, 180},
+            {0, 0, 0}, {135, 60, 21}, {112, 149, 123}
         };
         uint8_t *out_rgb = card->pixels + PASS_COLOR_BYTES;
         for(size_t i = 0; i < PASS_PROFILE_W * PASS_PROFILE_H; ++i)
@@ -245,13 +246,16 @@ static void pass_show_result(pass_load_result_t result)
         pass_card_t *old = m_active;
         if(next->color)
         {
+            lv_area_t area;
+            /* Resolve the final flex layout before caching the native overlay
+               position. The empty panel must not take part in this layout. */
+            lv_obj_add_flag(m_empty_panel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(m_card_img, LV_OBJ_FLAG_HIDDEN);
 #ifdef ARK_UI_SIMULATOR
             lv_image_set_src(m_card_img, &next->dsc);
-            lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
-            app_shell_stop_tick(&m_shell);
 #else
-            lv_area_t area;
             lv_image_set_src(m_card_img, NULL);
+#endif
             lv_obj_set_size(m_card_img, PASS_PROFILE_W, PASS_PROFILE_H);
             lv_obj_update_layout(m_card_img);
             lv_obj_get_coords(m_card_img, &area);
@@ -259,12 +263,15 @@ static void pass_show_result(pass_load_result_t result)
                                          PASS_PROFILE_W, PASS_PROFILE_H) != 0)
             {
                 result = PASS_LOAD_FAILED;
+#ifdef ARK_UI_SIMULATOR
+                lv_image_set_src(m_card_img, old != NULL ? &old->dsc : NULL);
+#else
+                if(old != NULL && !old->color) lv_image_set_src(m_card_img, &old->dsc);
+#endif
                 heap_caps_free(next);
                 next = NULL;
-                if(old != NULL && !old->color) lv_image_set_src(m_card_img, &old->dsc);
             }
             else app_shell_stop_tick(&m_shell);
-#endif
         }
         else
         {

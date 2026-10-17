@@ -18,6 +18,8 @@ enum FrameAlgorithm {
   colorQual,
   szEnhanced,
   atkinsonSzCalib,
+  colorQualMeasured,
+  colorQualCalibrated,
 }
 
 // Film code order: black, white, yellow, red, blue, green.
@@ -466,6 +468,20 @@ Future<Uint8List> quantizeFramePixels(
       onProgress: onProgress,
     );
   }
+  if (algorithm == FrameAlgorithm.colorQualMeasured ||
+      algorithm == FrameAlgorithm.colorQualCalibrated) {
+    return _measuredColorQualQuantize(
+      rgba,
+      width,
+      height,
+      algorithm == FrameAlgorithm.colorQualMeasured
+          ? colorQualMeasuredPalette
+          : colorQualCalibratedPalette,
+      strength: dither ? strength : 0,
+      checkCancelled: checkCancelled,
+      onProgress: onProgress,
+    );
+  }
   if (algorithm == FrameAlgorithm.colorFast55 ||
       algorithm == FrameAlgorithm.colorQual) {
     final fast = algorithm == FrameAlgorithm.colorFast55;
@@ -581,6 +597,85 @@ const _szPalette = <List<int>>[
   [36, 75, 24],
   [0, 18, 148],
 ];
+
+/// Measured ColorQual profiles share the same 46 valid Film 2.0 indices.
+/// Keep this path separate so the established ColorQual output stays stable.
+Future<Uint8List> _measuredColorQualQuantize(
+  Uint8List data,
+  int width,
+  int height,
+  List<List<int>> palette, {
+  required double strength,
+  void Function()? checkCancelled,
+  void Function(double)? onProgress,
+}) async {
+  final source = Uint8List.fromList(data);
+  final work = Float64List(width * height * 3);
+  for (var pixel = 0; pixel < width * height; pixel++) {
+    for (var channel = 0; channel < 3; channel++) {
+      work[pixel * 3 + channel] = source[pixel * 4 + channel].toDouble();
+    }
+  }
+  final labs = palette.map((c) => _lab(c[0], c[1], c[2], ae: true)).toList();
+  final codes = Uint8List(width * height);
+
+  void spread(int x, int y, List<double> errors, double weight) {
+    if (x < 0 || x >= width || y >= height) return;
+    final pixel = y * width + x;
+    for (var channel = 0; channel < 3; channel++) {
+      final offset = pixel * 3 + channel;
+      final original = source[pixel * 4 + channel];
+      work[offset] = (work[offset] + errors[channel] * weight)
+          .clamp(original - 64, original + 64)
+          .toDouble();
+    }
+  }
+
+  for (var y = 0; y < height; y++) {
+    final reverse = y.isOdd;
+    for (var step = 0; step < width; step++) {
+      final x = reverse ? width - 1 - step : step;
+      final pixel = y * width + x;
+      final rgb = <int>[
+        for (var channel = 0; channel < 3; channel++)
+          work[pixel * 3 + channel].clamp(0, 255).round(),
+      ];
+      final lab = _lab(rgb[0], rgb[1], rgb[2], ae: true);
+      var best = colorQualCandidates.first;
+      var minimum = double.infinity;
+      for (final index in colorQualCandidates) {
+        final target = labs[index];
+        final dl = (lab[0] - target[0]) * 1.2;
+        final da = lab[1] - target[1];
+        final db = lab[2] - target[2];
+        final distance = dl * dl + da * da + db * db;
+        if (distance < minimum) {
+          minimum = distance;
+          best = index;
+        }
+      }
+      codes[pixel] = best;
+      if (strength != 0) {
+        final errors = <double>[
+          for (var channel = 0; channel < 3; channel++)
+            (rgb[channel] - palette[best][channel]) * strength,
+        ];
+        final direction = reverse ? -1 : 1;
+        spread(x + direction, y, errors, 7 / 16);
+        spread(x - direction, y + 1, errors, 3 / 16);
+        spread(x, y + 1, errors, 5 / 16);
+        spread(x + direction, y + 1, errors, 1 / 16);
+      }
+      final color = palette[best];
+      data[pixel * 4] = color[0];
+      data[pixel * 4 + 1] = color[1];
+      data[pixel * 4 + 2] = color[2];
+      data[pixel * 4 + 3] = 255;
+    }
+    await _afterRow(y, height, .05, .9, checkCancelled, onProgress);
+  }
+  return codes;
+}
 
 /// The web Atkinson kernel accumulates unscaled residuals in Int32Array;
 /// each compound assignment truncates toward zero, including fractional strength.

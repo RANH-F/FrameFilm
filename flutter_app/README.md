@@ -4,6 +4,14 @@ Flutter 共用界面、Android BLE 桥接与 film / 固件 Wi-Fi Direct 传输�
 
 ## 当前范围
 
+### App 统一 WiFi 上传（当前开发）
+
+Android App 的文件上传统一使用 Wi-Fi Direct：Frame（含批量）、Film 和动画使用既有 film 直传，固件升级使用 WiFi OTA，通行证位图及 JSON 使用新增的指定路径文件直传。BLE 保留连接、控制、状态查询与资料回读。ForFilm 网页上传保持 BLE，未增加 WiFi 上传入口。
+
+通行证要求固件 `0x59` 能力 bit1；不支持时提示先升级固件，不自动退回 BLE。App 依次上传 `app/pass/profile.bin`、`app/pass/profile.json`，逐个等待设备保存与网络清理，再回读 JSON 核对。两文件不是原子事务；中断会显示部分完成状态，“重试上次上传”使用缓存从第一份文件重传。临时文件在替换、成功或退出后释放，进程重启清理遗留缓存。编译与模拟测试不代表真实 WiFi/SD/屏幕验收。
+
+本轮验证：通行证取消、重试和清理未确认时的恢复入口共 3 项 Flutter 测试通过；通行证上传与 Film/OTA 页面隔离测试通过；原始文件 HTTP 字节及路径 host probe 通过；ESP-IDF 5.5.2 固件构建通过。Android 使用当前 Flutter Gradle wrapper 检查 arm64 Kotlin 编译，未打包或安装 APK。实机仍需同时更新 App 与固件后验证两文件上传、取消与重试。
+
 - 六页：连接、Frame、Film、动画、通行证、设置。
 - 两套视觉：原 ForFilm 暖色圆角、明日方舟 PRTS 炭灰黑白冷蓝。
 - 默认自动模式：离线显示 ForFilm，Ark GATT 就绪后切主题并播放一次过场。名称后续回包不会重播；断连立即取消。明确选择 ForFilm 时保持该外观。
@@ -35,7 +43,7 @@ Flutter 共用界面、Android BLE 桥接与 film / 固件 Wi-Fi Direct 传输�
 
 ## 工具链与命令
 
-本轮使用 Flutter stable 3.47.6 / Dart 3.13.5。Android compile/target SDK 35、minSDK 28（Android 9）、JVM 17；Release 包名 `org.framefilm.ark.flutter`；显式 debug 构建包名 `org.framefilm.ark.flutter.dev`。Release/AOT APK 使用独立发行签名，本机配置在 `D:\FrameFilm-signing\key.properties`，可通过 `FRAMEFILM_SIGNING_PROPERTIES` 覆盖路径。密钥与密码不进入代码仓库，需安全备份；本机和 GitHub Actions 使用同一密钥。旧 debug 签名正式包无法直接覆盖升级，开发包可并行保留。配置方式见 [自动构建说明](../docs/development/ci-builds.md)。
+本轮使用 Flutter stable 3.47.6 / Dart 3.13.5。Android compile/target SDK 35、minSDK 28（Android 9）、JVM 17；Release 包名 `org.framefilm.ark.flutter`；显式 debug 构建包名 `org.framefilm.ark.flutter.dev`。Release/AOT APK 使用独立发行签名，本机配置在 `D:\FrameFilm-signing\key.properties`，可通过 `FRAMEFILM_SIGNING_PROPERTIES` 覆盖路径。密钥与密码不进入代码仓库，需安全备份；本机和 GitHub Actions 使用同一密钥。旧 debug 签名正式包无法直接覆盖升级，开发包可并行保留。配置方式见 [自动构建说明](../docs/ci-builds.md)。
 
 本机大型依赖与构建目录已经迁到 D 盘，原 C 盘入口保留 Windows 目录联接（junction）。没有更改系统 PATH，也没有迁移整个 `.codex/worktrees`：其他工作树仍有正在运行的程序和未提交内容。
 
@@ -98,7 +106,7 @@ python -m http.server 8770 --bind 127.0.0.1 --directory D:/dev-tool/FrameFilm-bu
 - 实机已成功导入 43,232 字节、720×480 的测试 film；初次直传到达设备保存阶段后返回错误 3。定位到旧 HTTP 服务附加时间戳后，加上固件 `.ffupload.part` 后缀超过 FATFS 64 字符限制；已将实际发送名限制为 50 字符以内并取消每次重试的时间戳前缀，UI 与设备保存名一致。
 - 修复后真机：导入通过；取消显示“已取消”，临时服务与连接清理确认；取消后重试可启动并接收完整 43,232 字节，仍在设备提交阶段返回状态 5 / 错误 3。100% 没有误报成功，失败后清理确认。所选 `ark_flutter_test.film` 与仓库样例 SHA-256 完全相同，用户确认 SD 卡可打开已有图片。设备最终保存、显示尚未验收通过，需要后续读取固件提交日志定位；未格式化 SD、未修改设备固件。
 - Android 9 分支本轮完成源码与 APK 编译检查，尚无 Android 9 真机结果；不能用 Android 17 手机代替该项验收。
-- 自动构建配置及产物说明见 [Ark 自动构建](../docs/development/ci-builds.md)。分别构建 Android debug APK 和 ESP-IDF 5.5.2 Ark 固件，保留构建日志；首次远端 [Ark builds](https://github.com/Rafael-ban/FrameFilm/actions/runs/37736539292) 的两项编译及产物上传已通过。
+- 自动构建配置及产物说明见 [Ark 自动构建](../docs/ci-builds.md)。分别构建 Android debug APK 和 ESP-IDF 5.5.2 Ark 固件，保留构建日志；首次远端 [Ark builds](https://github.com/Rafael-ban/FrameFilm/actions/runs/37736539292) 的两项编译及产物上传已通过。
 
 ## 保存故障定位补充（2026-10-08）
 
@@ -110,7 +118,7 @@ python -m http.server 8770 --bind 127.0.0.1 --directory D:/dev-tool/FrameFilm-bu
 - 同一份 film、同一文件名通过 BLE 静默保存成功，UART 确认 `Film transfer saved: 43232 bytes`。此结果支持继续调查 WiFi 保存路径，不能据此宣称 WiFi 保存已修复。
 - 保存诊断固件已增量编译并通过 BLE OTA 部署，大小 1,852,064 字节，镜像 SHA-256 `c4b0c586d0a2cb18330817ef50200f9f63729d7bda80faf0729f474ac66e5abf`，启动 ELF 摘要前缀 `da7026223`；设备恢复蓝牙，通行证档案回读与升级前一致。
 - 诊断实测明确失败于文件头校验：`Invalid film color count: 0 (format=0)`，路径 `/sdcard/film/ark_flutter_test.film.ffupload.part`。导入源应为 format=1，故目前证据是 WiFi 路径最终读回头部与源不符；尚未确定差异出现在 HTTP 接收还是存储写入/读回，不能宣称根因或修复完成。
-- 后续对照已定位首次差异：HTTP 接收与文件任务 `fwrite` 前的 32 字节均与源文件一致；关闭并重新打开后，读回的 32 字节全为 `00`，偏移 0 为 `C0 → 00`。问题已收窄到写入至读回的存储链路，尚不能区分文件系统、驱动或介质根因；校验继续拒绝异常文件。结构化实机证据见 [文件头对照](../docs/development/ark-header-trace-20261008.json)。当前无扫描逻辑修改。
+- 后续对照已定位首次差异：HTTP 接收与文件任务 `fwrite` 前的 32 字节均与源文件一致；关闭并重新打开后，读回的 32 字节全为 `00`，偏移 0 为 `C0 → 00`。问题已收窄到写入至读回的存储链路，尚不能区分文件系统、驱动或介质根因；校验继续拒绝异常文件。结构化实机证据见 文件头对照（本地开发记录）。当前无扫描逻辑修改。
 - 后续三阶段诊断记录 `http`（接收缓冲）、`prewrite`（文件任务写前）、`readback`（关闭后重新打开读回）的前 32 字节；镜像 SHA-256 `e0e6ae8b8126325dac5676faaccc0fe4aa2f45501525e119814599c9666a1d6b`，大小 1,852,944 字节，已 OTA 部署，启动 ELF 摘要前缀 `3b055b23f`，通行证档案保持一致。
 
 - 对照实测后，源码进一步限定只记录 film 的写前头部，避免记录非 film 显式路径文件；增量编译通过，此日志范围收窄未再次部署，film 路径与已测诊断版一致。
@@ -122,15 +130,15 @@ python -m http.server 8770 --bind 127.0.0.1 --directory D:/dev-tool/FrameFilm-bu
 - 直接申请 4096 字节内部 DMA 内存实测资源不足（`state=5/error=6`）；最终改为 `heap_caps_malloc(want, MALLOC_CAP_SPIRAM)`，由 S3 SDMMC 既有的单 sector DMA 缓冲中转。保留 4096 网络分块上限、文件校验、取消及提交语义；额外同步和重复读取探针未纳入最终修复。
 - 最终固件 3.2.5 已 OTA 启动：1,853,200 字节，SHA-256 `c3d4ddda362449dccc7a70fc0c031339abf4b7e1aa47e0b2ab0cf6ea17edb102`，ELF 前缀 `59982a465`。首次电脑重连核验时手机已占用 BLE，后续单独只读核验确认版本及通行证档案保持一致。
 - 同一台手机、现有 APK 与 `ark_flutter_test.film` 实测：缓冲位于 PSRAM `0x3c1f04f4`；HTTP、写前、落盘读回的 32 字节完全一致；日志确认正式提交文件及 `state=4 bytes=43232/43232 error=0`。App 显示传输完成、原 WiFi 配置未变、临时服务与连接清理确认。此项为保存链路验收，不代表整文件回读 hash 或实体屏幕显示验收；本轮未扩大为全量回归。
-- 结构化证据见 [DMA 缓冲修复对照](../docs/development/ark-dma-buffer-fix-20261008.json)。此前取消、清理测试仍以先前记录为准，本轮修复后的验证集中于失败的保存路径。
+- 结构化证据见 DMA 缓冲修复对照（本地开发记录）。此前取消、清理测试仍以先前记录为准，本轮修复后的验证集中于失败的保存路径。
 
 ### 实体显示验收（2026-10-08）
 
 - 通过现有 `0x4B/0x06/0x07/0x08` 精确选择刚保存的 `ark_flutter_test.film`，日志确认完整读取 43,232 字节。用户照片显示图案完整，但以竖屏排线朝下为基准，图标相对参考图逆时针转了 90°；初次“正常”反馈已据此修正，不作为方向通过结论。
 - `.film` 导入是原样复制，播放器直接使用面板像素；该测试样例是横向排布。新样例按设备 UI 的 480×720 逻辑画布与 `dx=719-y, dy=x` 映射生成物理 720×480 数据，未修改固件或 App 的全局旋转规则。
-- [竖屏样例](../docs/development/fixtures/ark_portrait_test.film) 经同一 App WiFi 传输返回 `state=4/error=0`，设备正式提交并完整加载 43,232 字节，当前索引为 5。用户最终确认“方向和图案都正确，圆点在左上角”。播放模式原本为手动，本轮未更改；App 确认原 WiFi 配置未变、临时连接清理完成。
-- 本轮完成实体显示路径验收；固件没有普通 film 文件的内容/hash 回读命令，因此仍不声称完成整文件回读 SHA-256。证据与样例摘要见 [显示验收记录](../docs/development/ark-wifi-display-acceptance-20261008.json)。
-- 保存后旧图重复刷新已在 `9cf19eb` 修复并实机验收：只排队新图，提交到显示请求约70ms，取消旧图额外28.95s彩刷；用户确认显示正常且方向正确。证据见 `docs/development/ark-display-order-fix-20261008.json`。
+- 竖屏样例（本地开发记录） 经同一 App WiFi 传输返回 `state=4/error=0`，设备正式提交并完整加载 43,232 字节，当前索引为 5。用户最终确认“方向和图案都正确，圆点在左上角”。播放模式原本为手动，本轮未更改；App 确认原 WiFi 配置未变、临时连接清理完成。
+- 本轮完成实体显示路径验收；固件没有普通 film 文件的内容/hash 回读命令，因此仍不声称完成整文件回读 SHA-256。证据与样例摘要见 显示验收记录（本地开发记录）。
+- 保存后旧图重复刷新已在 `9cf19eb` 修复并实机验收：只排队新图，提交到显示请求约70ms，取消旧图额外28.95s彩刷；用户确认显示正常且方向正确。证据保留在本地开发记录中。
 
 ## WiFi 固件 OTA（本地开发，未推送）
 
@@ -166,7 +174,7 @@ Web真实查询可用，普通Web不提供原生下载与刷机。模拟设备�
 
 - Flutter 定向7项测试及受影响文件analyze通过，Android下载helper host probe覆盖正常、截断、超长、空响应、SHA不匹配、HTTP失败和取消。
 - Android arm64 debug APK 构建及Dart运行资源检查通过，最低Android9保持不变；本轮未安装手机，不将host与模拟测试当作实际网络下载/生命周期验收。
-- 本次公开GitHub API返回HTTP200/空列表。可选Release发布工作流已准备，默认关闭，尚未推送/发布/运行远端验证。详见[构建与发布说明](../docs/development/ci-builds.md)。
+- 本次公开GitHub API返回HTTP200/空列表。可选Release发布工作流已准备，默认关闭，尚未推送/发布/运行远端验证。详见[构建与发布说明](../docs/ci-builds.md)。
 
 - Web 构建通过，Edge 已实际查询 GitHub（HTTP200/空列表）并完成模拟下载取消、重新下载及导入；未自动执行 OTA。
 

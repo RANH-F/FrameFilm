@@ -156,7 +156,7 @@
       g.fillStyle = '#fff'; g.fillRect(ax + 18, ay + 66, AV_W - 36, 27);
       txt('未设置头像', ax + 32, ay + 84, 13, 700);
     }
-    line(20, 308, 148, 308); txt('头像 / 128×160', 20, 325, 12, 600);
+    line(20, 308, 148, 308);
     const right = 173;
     chip('代号', right, 143, 65);
     txt(profile.codename.trim() || '未设置', right, 204, 29, 700);

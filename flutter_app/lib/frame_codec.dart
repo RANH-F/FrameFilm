@@ -40,12 +40,14 @@ class FrameResult {
     required this.png,
     required this.film,
     required this.format,
+    this.algorithm = FrameAlgorithm.atkinsonEnhanced,
     this.width = 480,
     this.height = 720,
   });
   final Uint8List png, film;
   final int width, height;
   final FrameFormat format;
+  final FrameAlgorithm algorithm;
 }
 
 class FrameCancelledException implements Exception {
@@ -309,12 +311,16 @@ Future<FrameResult> convertFrame(
       ? FrameFormat.monoFast
       : options.algorithm == FrameAlgorithm.colorFast55
       ? FrameFormat.colorFast55
-      : options.algorithm == FrameAlgorithm.colorQual
+      : options.algorithm == FrameAlgorithm.colorQual ||
+            options.algorithm == FrameAlgorithm.colorQualMeasured ||
+            options.algorithm == FrameAlgorithm.colorQualCalibrated
       ? FrameFormat.colorQual
       : options.format;
   final algorithm = format == FrameFormat.colorFast55
       ? FrameAlgorithm.colorFast55
-      : format == FrameFormat.colorQual
+      : format == FrameFormat.colorQual &&
+            options.algorithm != FrameAlgorithm.colorQualMeasured &&
+            options.algorithm != FrameAlgorithm.colorQualCalibrated
       ? FrameAlgorithm.colorQual
       : options.algorithm;
   Uint8List indices;
@@ -349,5 +355,10 @@ Future<FrameResult> convertFrame(
   _check(isCancelled);
   final film = packFramePixels(indices, format: format);
   onProgress?.call(1);
-  return FrameResult(png: png, film: film, format: format);
+  return FrameResult(
+    png: png,
+    film: film,
+    format: format,
+    algorithm: algorithm,
+  );
 }

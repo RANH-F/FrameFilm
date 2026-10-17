@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:framefilm_ark/passport_avatar_editor.dart';
 import 'package:framefilm_ark/passport_editor.dart';
 import 'package:framefilm_ark/passport_profile.dart';
+import 'package:framefilm_ark/frame_algorithms.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -83,6 +85,43 @@ void main() {
       expect(g[i + 2], g[i]);
     }
   });
+  test(
+    'adaptive avatar uses Film quantization and preserves saved algorithms',
+    () async {
+      final src = await source();
+      final edit = PassportAvatarEdit(src);
+      expect(edit.options['algorithm'], 'adaptive');
+      final rendered = await renderAvatarEdit(edit, 'color');
+      final expected = Uint8List.fromList(await rgba(rendered.crop));
+      adjustFrameColors(expected, contrast: 1, saturation: 1);
+      await quantizeFramePixels(
+        expected,
+        128,
+        160,
+        algorithm: FrameAlgorithm.adaptive,
+      );
+      expect(await rgba(rendered.processed), orderedEquals(expected));
+      final saved = PassportAvatarEdit.fromJson({
+        'source': src,
+        'options': {'algorithm': 'atkinson', 'strength': .8},
+      });
+      expect(saved.options['algorithm'], 'atkinson');
+      expect(saved.options['strength'], .8);
+      var checks = 0;
+      await expectLater(
+        renderAvatarEdit(
+          edit,
+          'color',
+          checkCancelled: () {
+            checks++;
+            throw StateError('cancelled');
+          },
+        ),
+        throwsStateError,
+      );
+      expect(checks, greaterThan(0));
+    },
+  );
   test('unsupported palette modes and invalid stored options rejected', () {
     expect(
       () => PassportAvatarEdit.fromJson({
@@ -145,10 +184,10 @@ void main() {
       for (final mode in ['grayscale', 'color']) {
         await tester.runAsync(() async {
           tester
-            .widget<DropdownButtonFormField<String>>(
-              find.byType(DropdownButtonFormField<String>),
-            )
-            .onChanged!(mode);
+              .widget<DropdownButtonFormField<String>>(
+                find.byType(DropdownButtonFormField<String>),
+              )
+              .onChanged!(mode);
           await Future<void>.delayed(const Duration(milliseconds: 150));
         });
         await tester.pump();

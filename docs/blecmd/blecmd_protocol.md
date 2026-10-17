@@ -309,7 +309,15 @@
 
 | 通道 | 名称 | 请求 | 响应 |
 |---|---|---|---|
-| 0x59 | CAPABILITIES_GET | 空 | 版本 1(u8) + flags(u32 BE)，bit0=彩色通行证 |
+| 0x59 | CAPABILITIES_GET | 空 | 版本 1(u8) + flags(u32 BE)，bit0=彩色通行证、bit1=通用 WiFi 文件上传 |
+
+### 3.16 Ark 通用 WiFi 文件上传（0x5A）
+
+仅 `frame_film_ark` 支持，完整会话与路径语义见 [§4.16](#416-ark-通用-wifi-文件上传0x5a)。
+
+| 通道 | 名称 | 请求 DATA | 同通道响应 DATA |
+|---|---|---|---|
+| 0x5A | WIFI_DIRECT_FILE_START | `SSID\0PASSWORD\0URL\0相对目标路径\0` | 1B：0 接受 / 1 忙 / 2 参数错误 / 3 资源不足 |
 
 ## 4. 命令详解
 
@@ -1469,9 +1477,15 @@ SUM  = (0x55 + 0x4E + 0x01 + 0x02) & 0xFF = 0xA6
 
 ### 4.15 Ark 能力查询（0x59）与彩色通行证
 
-仅 `frame_film_ark` 实现 `CAPABILITIES_GET`：请求 LEN=0，回包 LEN=5，`capVersion=1(u8)` 后接 `flags(u32 BE)`。当前仅 bit0 (`0x00000001`) 表示支持通行证彩色 `profile.bin`；其余位保留且为零。旧固件不响应此命令，客户端应提示升级固件或选择黑白模式，不发送彩色资料，不能凭用户可见版本号判断能力。
+仅 `frame_film_ark` 实现 `CAPABILITIES_GET`：请求 LEN=0，回包 LEN=5，`capVersion=1(u8)` 后接 `flags(u32 BE)`。bit0 (`0x00000001`) 表示支持通行证彩色 `profile.bin`；bit1 (`0x00000002`) 表示支持 0x5A 通用 WiFi 文件上传，当前 flags=`0x00000003`；其余位保留且为零。旧固件不响应此命令，客户端应提示升级固件或选择黑白模式，不发送彩色资料，不能凭用户可见版本号判断能力。
 
 通行证卡片文件仍放在 `/sdcard/app/pass/profile.bin`，文件头 16B：`FFUI`(4B)、version(1B)、format(1B)、width=440(u16 LE)、height=608(u16 LE)、保留零(6B)。原 v1/format1 的正文为 33440B、每字节 MSB 起 8 个黑白像素（1=黑）；新 v2/format2 的正文为 133760B、每字节高 nibble 为左像素，色码为黑0、白1、黄2、红3、蓝5、绿6。整文件分别为 33456B 和 133776B。彩色卡仅在 Ark UI 通行证页合成到黑白外壳，整屏走 EPD 4bpp 彩色刷新；退出页面回到原黑白 UI 路径。
+
+### 4.16 Ark 通用 WiFi 文件上传（0x5A）
+
+`WIFI_DIRECT_FILE_START` 使用 0x50 相同的临时 WiFi 网络、HTTP 下载与状态机，请求为四个 NUL 结尾的 ASCII 字段 `SSID\0PASSWORD\0URL\0相对目标路径\0`，不含额外字节。SSID、密码、HTTP URL 和 192B DATA 上限沿用 0x50；目标路径相对 `/sdcard`，不得以 `/` 开头、包含反斜杠或 `..`，且不能超过文件保存接口的路径长度。示例：`app/pass/profile.bin`、`app/pass/profile.json`。响应 0/1/2/3 与 0x50 一致。客户端应先查 0x59 的 bit1，再发送 0x5A。
+
+HTTP 响应需为 200 且有非零 Content-Length；文件可为任意非空二进制或文本，不要求 32B film 头或 `.film` 后缀。显式目标以暂存文件写入，只有完整下载、长度检查和提交都成功后，0x51 才能最终报 DONE；保存失败报 ERROR/error=3，取消时撤销未提交暂存。目标若为 `.film`，仍按现有显式路径规则验证 film 内容。上传不自动切换或刷新 app 页面，也不触发图片列表事件。已提交文件不会因网络恢复失败或迟到取消而删除；0x51 的 DONE 还要求恢复原 WiFi 状态。0x51 状态查询和 0x52 取消的格式、终态与 0x50/0x57 共用。直传忙时另一个 0x5A 返回 1。
 
 ## 5. 校验和计算
 
@@ -1633,6 +1647,7 @@ int parse_response(uint8_t* in_buf, int in_len, uint8_t* out_ch, uint8_t* out_da
 
 | 版本 | 日期 | 描述 |
 |------|------|------|
+| 1.17 | 2026-10-16 | Ark 新增 0x5A 通用 WiFi 文件上传；0x59 bit1 宣告能力，复用 0x51/0x52 状态与取消 |
 | 1.16 | 2026-10-16 | 合并上游参数布局 v6 后保留 Ark 0x59 能力查询及彩色 FFUI v2 通行证；升级迁移 v5 系统参数与原独立蓝牙名 |
 | 1.15 | 2026-10-12 | Ark 设备名称后缀改随系统参数 blob 持久化（`ServiceBle_Def_t.ble_name`，取消独立 NVS key `ble_name`；`SERVICE_PARAM_VER` 升至 6）；0x54/0x55 报文与生效时机不变 |
 | 1.14 | 2026-10-08 | Ark WiFi OTA 0x56~0x58：实际ELF SHA构建身份、inactive Flash流式校验、READY/apply、取消与超时；未启用boot rollback |
