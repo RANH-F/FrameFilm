@@ -110,6 +110,133 @@ static int ensure_preview_dir(const char *dir)
     return 0;
 }
 
+static uint8_t preview_i1_buf[8 + 480 * 720 / 8];
+
+static void preview_i1_flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
+{
+    (void)area;
+    (void)pixels;
+    lv_display_flush_ready(display);
+}
+
+static int save_i1_frame(lv_display_t *display, const char *dir, const char *name)
+{
+    char path[1024];
+    if(snprintf(path, sizeof(path), "%s/%s.bmp", dir, name) >= (int)sizeof(path)) return -1;
+    for(int i = 0; i < 12; i++) { lv_timer_handler(); simulator_process_requests(); SDL_Delay(10); }
+    lv_refr_now(display);
+    SDL_Surface *surface = SDL_CreateRGBSurfaceWithFormat(0, 480, 720, 8, SDL_PIXELFORMAT_INDEX8);
+    if(!surface) return -1;
+    const SDL_Color colors[2] = {{0, 0, 0, 255}, {255, 255, 255, 255}};
+    if(SDL_SetPaletteColors(surface->format->palette, colors, 0, 2) != 0) {
+        SDL_FreeSurface(surface);
+        return -1;
+    }
+    const uint8_t *pixels = preview_i1_buf + 8;
+    for(int y = 0; y < 720; y++) {
+        uint8_t *row = (uint8_t *)surface->pixels + y * surface->pitch;
+        for(int x = 0; x < 480; x++)
+            row[x] = (pixels[y * 60 + x / 8] >> (7 - x % 8)) & 1;
+    }
+    int result = SDL_SaveBMP(surface, path);
+    SDL_FreeSurface(surface);
+    fprintf(stderr, "I1 %s: %s\n", name, result == 0 ? path : SDL_GetError());
+    return result;
+}
+
+static lv_display_t *create_i1_display(void)
+{
+    lv_tick_set_cb(SDL_GetTicks);
+    lv_display_t *display = lv_display_create(480, 720);
+    if(!display) { fputs("LVGL I1 display failed\n", stderr); return NULL; }
+    lv_display_set_color_format(display, LV_COLOR_FORMAT_I1);
+    lv_display_set_flush_cb(display, preview_i1_flush);
+    lv_display_set_buffers(display, preview_i1_buf, NULL, sizeof(preview_i1_buf), LV_DISPLAY_RENDER_MODE_FULL);
+    return display;
+}
+
+static int save_menu_preview(const char *dir)
+{
+    if(ensure_preview_dir(dir) != 0) {
+        fprintf(stderr, "Cannot create preview directory: %s\n", dir);
+        return 1;
+    }
+    lv_display_t *display = create_i1_display();
+    if(!display) return 1;
+    int result = 0;
+    for(int lang = 0; lang < 2; lang++) {
+        app_language_set(lang ? APP_LANGUAGE_EN : APP_LANGUAGE_ZH_CN);
+        show_menu();
+        for(uint8_t i = 0; i < APP_MENU_ENTRY_NUM; i++) {
+            char name[32];
+            menu_sel = i;
+            g_app_menu_entry.ui_ops->on_msg(APP_UI_MSG_MENU_SEL, &menu_sel, 1);
+            snprintf(name, sizeof(name), "menu-%s-%u", lang ? "en" : "zh", (unsigned)i);
+            if(save_i1_frame(display, dir, name) != 0) { result = 1; break; }
+        }
+        if(result) break;
+    }
+    simulator_show(NULL, NULL);
+    lv_display_delete(display);
+    fprintf(stderr, "menu I1 preview %s\n", result ? "FAIL" : "PASS");
+    return result;
+}
+
+
+static int save_font_preview(const char *dir)
+{
+    if(ensure_preview_dir(dir) != 0) {
+        fprintf(stderr, "Cannot create preview directory: %s\n", dir);
+        return 1;
+    }
+    lv_display_t *display = create_i1_display();
+    if(!display) return 1;
+    int result = 0;
+    char name[80];
+    for(int lang = 0; lang < 2 && !result; lang++) {
+        const char *language = lang ? "en" : "zh";
+        app_language_set(lang ? APP_LANGUAGE_EN : APP_LANGUAGE_ZH_CN);
+        for(int egg = 0; egg <= 5 && !result; egg++) {
+            if(lang && egg == 1) continue;
+            char value[2] = {(char)('0' + egg), '\0'};
+            if(setenv("ARK_BOOT_EGG", value, 1) != 0) { result = 1; break; }
+            show_boot();
+            snprintf(name, sizeof(name), "font-boot-%d-%s", egg, language);
+            result |= save_i1_frame(display, dir, name);
+            show_sleep();
+            snprintf(name, sizeof(name), "font-sleep-%d-%s", egg, language);
+            result |= save_i1_frame(display, dir, name);
+        }
+        show_menu();
+        for(uint8_t i = 0; i < APP_MENU_ENTRY_NUM && !result; i++) {
+            menu_sel = i;
+            g_app_menu_entry.ui_ops->on_msg(APP_UI_MSG_MENU_SEL, &menu_sel, 1);
+            snprintf(name, sizeof(name), "font-menu-%u-%s", (unsigned)i, language);
+            result |= save_i1_frame(display, dir, name);
+        }
+        simulator_show(g_app_settings_entry.ui_ops, &g_app_settings_entry);
+        for(int row = 0; row < SETTINGS_ROW_NUM && !result; row++) {
+            snprintf(name, sizeof(name), "font-settings-%d-%s", row, language);
+            result |= save_i1_frame(display, dir, name);
+            g_app_settings_entry.ui_ops->on_key(INPUT_PRESS_UP);
+        }
+        simulator_show(g_app_clock_entry.ui_ops, &g_app_clock_entry);
+        snprintf(name, sizeof(name), "font-clock-%s", language);
+        result |= save_i1_frame(display, dir, name);
+        if(setenv("ARK_PASS_PROFILE", "/missing-ark-font-preview.bin", 1) != 0) {
+            result = 1;
+            break;
+        }
+        simulator_show(g_app_pass_entry.ui_ops, &g_app_pass_entry);
+        snprintf(name, sizeof(name), "font-pass-empty-%s", language);
+        result |= save_i1_frame(display, dir, name);
+    }
+    simulator_show(NULL, NULL);
+    lv_display_delete(display);
+    fprintf(stderr, "font I1 preview %s\n", result ? "FAIL" : "PASS");
+    return result ? 1 : 0;
+}
+
 static int save_prts_preview(lv_display_t *display, const char *dir)
 {
     char name[32];
@@ -218,6 +345,20 @@ static int check_pass_layout(lv_display_t *display, const char *preview_dir)
 int main(int argc, char **argv)
 {
     lv_init();
+    if(argc >= 2 && strcmp(argv[1], "--menu-preview") == 0) {
+        if(argc != 3 || argv[2][0] == '\0') {
+            fputs("Usage: ark-ui-simulator --menu-preview <dir>\n", stderr);
+            return 1;
+        }
+        return save_menu_preview(argv[2]);
+    }
+    if(argc >= 2 && strcmp(argv[1], "--font-preview") == 0) {
+        if(argc != 3 || argv[2][0] == '\0') {
+            fputs("Usage: ark-ui-simulator --font-preview <dir>\n", stderr);
+            return 1;
+        }
+        return save_font_preview(argv[2]);
+    }
     lv_display_t *display = lv_sdl_window_create(480, 720);
     if(!display) { fputs("LVGL SDL window failed\n", stderr); return 1; }
     lv_sdl_window_set_title(display, "FrameFilm Ark UI simulator");

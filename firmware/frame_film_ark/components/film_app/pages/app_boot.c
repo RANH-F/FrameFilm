@@ -38,6 +38,7 @@
 #include "ui_conf.h"    /* UI_CALIB_FRAME：上机标定帧开关 */
 #include "ui_ops.h"
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "ui_boot_typography.h"
 #include "app_shell.h"
 #include "app_language.h"
@@ -389,7 +390,7 @@ static void boot_ui_create(lv_obj_t *root)
         lv_obj_set_scrollable(row, false);
         lv_obj_set_size(row, LV_PCT(100), 22);
         lv_obj_set_pos(row, 0, 0);
-        boot_label(row, &ui_font_14, lv_color_black(), app_text("启动序列 A-01", "BOOT SEQ A-01"));
+        boot_label(row, app_font_small(), lv_color_black(), app_text("启动序列 A-01", "BOOT SEQ A-01"));
     }
     {
         lv_obj_t *r = boot_rule(body);
@@ -449,7 +450,7 @@ static void boot_ui_create(lv_obj_t *root)
         lv_obj_set_pos(row, 0, badge_bot + 152);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        boot_label(row, &ui_font_14, lv_color_black(), app_text("系统初始化", "SYSTEM INIT"));
+        boot_label(row, app_font_small(), lv_color_black(), app_text("系统初始化", "SYSTEM INIT"));
         {
             lv_obj_t *sp = lv_obj_create(row);
 
@@ -458,7 +459,7 @@ static void boot_ui_create(lv_obj_t *root)
             lv_obj_set_size(sp, 1, 1);
             lv_obj_set_flex_grow(sp, 1);
         }
-        m_pct_label = boot_label(row, &ui_font_14, lv_color_black(), "0%");
+        m_pct_label = boot_label(row, app_font_small(), lv_color_black(), "0%");
     }
 
     /* ---- 自检遥测（左名 / 右值 / 尾 OK） ---- */
@@ -472,11 +473,11 @@ static void boot_ui_create(lv_obj_t *root)
         char localized[40];
         int32_t y = (int32_t)i * 22;
         const char *value = boot_tele_value(m_tele[i].value, localized, sizeof(localized));
-        lv_obj_t *n = boot_label(tele_box, &ui_font_14, lv_color_black(), boot_tele_name(m_tele[i].name));
+        lv_obj_t *n = boot_label(tele_box, app_font_small(), lv_color_black(), boot_tele_name(m_tele[i].name));
         lv_obj_set_pos(n, 0, y);
-        lv_obj_t *v = boot_label(tele_box, &ui_font_14, lv_color_black(), value);
+        lv_obj_t *v = boot_label(tele_box, app_font_small(), lv_color_black(), value);
         lv_obj_align(v, LV_ALIGN_TOP_RIGHT, -48, y);
-        m_tele_ok[i] = boot_label(tele_box, &ui_font_14, lv_color_black(), app_text("等待", "--"));
+        m_tele_ok[i] = boot_label(tele_box, app_font_small(), lv_color_black(), app_text("等待", "--"));
         lv_obj_align(m_tele_ok[i], LV_ALIGN_TOP_RIGHT, 0, y);
     }
 

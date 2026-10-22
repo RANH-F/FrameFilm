@@ -14,6 +14,7 @@
 #include "ui_display.h"
 #include "ui_assets.h"
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "app_shell.h"
 #include "app_language.h"
 #include "app_manager.h"
@@ -344,14 +345,14 @@ static void pass_ui_create(lv_obj_t *root)
     icon = lv_image_create(m_empty_panel);
     src = ui_assets_icon(UI_ICON_PASS);
     if(src != NULL) lv_image_set_src(icon, src);
-    title = pass_label(m_empty_panel, &ui_font_36, lv_color_black(), app_text("通行证", "PASS"));
+    title = pass_label(m_empty_panel, app_font_hero(), lv_color_black(), app_text("通行证", "PASS"));
     lv_obj_set_style_text_letter_space(title, PASS_WORD_LS, LV_PART_MAIN);
     lv_obj_set_style_translate_x(title, PASS_WORD_LS / 2, LV_PART_MAIN);
     pass_rule(m_empty_panel);
-    m_empty_note = pass_label(m_empty_panel, &ui_font_18, lv_color_black(), app_text("尚未配置资料", "No profile configured"));
-    (void)pass_label(m_empty_panel, &ui_font_14, lv_color_black(), app_text("单击确认刷新", "Press Enter to reload"));
+    m_empty_note = pass_label(m_empty_panel, app_font_body(), lv_color_black(), app_text("尚未配置资料", "No profile configured"));
+    (void)pass_label(m_empty_panel, app_font_small(), lv_color_black(), app_text("单击确认刷新", "Press Enter to reload"));
 
-    m_result_note = pass_label(root, &ui_font_14, lv_color_black(), "");
+    m_result_note = pass_label(root, app_font_small(), lv_color_black(), "");
     lv_obj_set_pos(m_result_note, SHELL_BODY_PAD_X, 672);
     pass_show_result((pass_load_result_t)atomic_load(&m_prepare_result));
     pass_apply_status();

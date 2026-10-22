@@ -221,9 +221,10 @@ static lv_obj_t *menu_make_plate(lv_obj_t *parent, uint8_t idx, int cur)
     {
         lv_image_set_src(img, src);
     }
-    /* 卡片名字用 16px 像素字：短码只有 3 个字符（48px 宽）比图标还窄，卡片装得下，
-       与上面同字号的编号一起构成"卡片自己的标签"；卡片外的正文仍是 8px */
-    menu_label(grp, &ui_font_14, fg, it->name);
+    /* 英文短码用 8px UNSCII，中文名称用 Source Han Sans Bold 16px 点阵；编号仍用 16px UNSCII。
+       字体随语言切换，卡片尺寸与定位保持不变。 */
+    menu_label(grp, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_14,
+               fg, app_language_get() == APP_LANGUAGE_EN ? it->code : it->name);
     lv_obj_center(grp);
 
     return plate;
@@ -432,6 +433,11 @@ static void menu_ui_create(lv_obj_t *root)
     /* ============ 外壳：顶部状态栏 + 底部提示行 ============ */
     app_shell_build(root, app_text("上下选择  确认进入  长按休眠", "UP/DOWN SELECT   ENTER OPEN   HOLD SLEEP"),
                     app_text("菜单", "MENU"), &m_shell);
+    if(app_language_get() != APP_LANGUAGE_EN)
+    {
+        lv_obj_set_style_text_font(m_shell.hint_label, &ui_font_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(m_shell.page_label, &ui_font_14, LV_PART_MAIN);
+    }
 
     /* ============ 正文：夹在状态栏与提示行之间 ============ */
     body = lv_obj_create(root);
@@ -537,11 +543,13 @@ static void menu_ui_create(lv_obj_t *root)
 
             lv_obj_center(t);
         }
-        m_name_label = menu_label(row, &ui_font_24, lv_color_black(), app_text("图片", "Image"));
+        m_name_label = menu_label(row, app_language_get() == APP_LANGUAGE_EN ? &lv_font_montserrat_24 : &ui_font_24,
+                                  lv_color_black(), app_text("图片", "IMAGE"));
     }
 
     /* ---- 一句话说明 ---- */
-    m_desc_label = menu_label(stack, &ui_font_18, lv_color_black(), "");
+    m_desc_label = menu_label(stack, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_18,
+                              lv_color_black(), "");
     lv_obj_set_size(m_desc_label, CONTENT_W, ROW_DESC_H);
 
     /* ---- 间隙 ---- */
@@ -562,9 +570,11 @@ static void menu_ui_create(lv_obj_t *root)
     lv_obj_set_style_border_color(panel, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_pad_all(panel, 10, LV_PART_MAIN);
 
-    m_panel_line1 = menu_label(panel, &ui_font_18, lv_color_black(), "");
+    m_panel_line1 = menu_label(panel, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_18,
+                               lv_color_black(), "");
     lv_obj_set_pos(m_panel_line1, 0, 0);
-    m_panel_line2 = menu_label(panel, &ui_font_18, lv_color_black(), "");
+    m_panel_line2 = menu_label(panel, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_18,
+                               lv_color_black(), "");
     lv_obj_set_pos(m_panel_line2, 0, 24);
 
     /* ---- 进入失败提示：面板下方的留白处，默认隐藏 ---- */
@@ -585,9 +595,11 @@ static void menu_ui_create(lv_obj_t *root)
         lv_obj_set_size(tag, NOTICE_TAG_W, NOTICE_TAG_H);
         lv_obj_set_style_bg_color(tag, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(tag, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_center(menu_label(tag, &ui_font_18, lv_color_white(), app_text("提示", "FAILED")));
+        lv_obj_center(menu_label(tag, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_18,
+                                 lv_color_white(), app_text("提示", "FAILED")));
 
-        m_notice_label = menu_label(m_notice_row, &ui_font_18, lv_color_black(), "");
+        m_notice_label = menu_label(m_notice_row, app_language_get() == APP_LANGUAGE_EN ? &lv_font_unscii_8 : &ui_font_18,
+                                    lv_color_black(), "");
     }
 
     menu_apply_sel();

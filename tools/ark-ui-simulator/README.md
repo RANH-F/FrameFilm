@@ -18,6 +18,22 @@ cmake --build tools/ark-ui-simulator/build -j4
 
 操作：↑/↓ 切换菜单项或设置行；Enter 进入页面、修改设置；双击 Enter 返回菜单并高亮刚离开的应用；按住 Enter 一秒预览休眠卡。数字 1–6 依次直接预览开机、菜单、设置、休眠卡、通行证、时钟。Esc 关闭窗口。图片、模板、动图走固件直绘路径，尚未接入此模拟器。
 
+检查菜单字体的真实 I1 渲染时，用 `--menu-preview <目录>`：
+
+```sh
+./tools/ark-ui-simulator/build/ark-ui-simulator --menu-preview .output/ark/menu-preview
+```
+
+该入口无需 SDL 窗口，使用与 Ark 固件相同的 480×720 I1 全屏格式，再逐像素保存为 1:1 黑白 BMP。共输出 12 张：`menu-zh-0.bmp` 至 `menu-zh-5.bmp`、`menu-en-0.bmp` 至 `menu-en-5.bmp`；数字是从 0 开始的选中菜单项索引。可逐张检查中英文六项文字与字形；截图只验证 LVGL 渲染，不代表实体电子纸显示效果。
+
+统一字体的全页预览使用 `--font-preview <目录>`，导出共享 C 页面源码的 480×720 I1 黑白截图：
+
+```sh
+./tools/ark-ui-simulator/build/ark-ui-simulator --font-preview .output/ark/font-preview
+```
+
+包含中英文主菜单各六项、设置页 18 个导航状态、时钟、通行证空状态，以及开机和休眠的普通画面与各条可用彩蛋。共输出 74 张 `font-<页面>-<状态>-zh.bmp` / `-en.bmp`（时钟省略状态）。此入口无需 SDL 窗口，不连接设备；通行证档案本体是上传的位图，预览只检查其外围提示和空状态。字库生成方法见 [字体说明](../ark-font/README.md)。
+
 只生成 PRTS 主题截图时，用 `--prts-preview <目录>`，无需运行完整的 `--smoke` 导航：
 
 ```sh
