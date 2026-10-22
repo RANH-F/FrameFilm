@@ -68,6 +68,7 @@ void main() {
     String tag,
     String published, {
     bool prerelease = false,
+    String owner = 'Rafael-Ikaros',
   }) => {
     'tag_name': tag,
     'published_at': published,
@@ -78,7 +79,7 @@ void main() {
           'name': name,
           'size': name == apk ? 100 : 20,
           'browser_download_url':
-              'https://github.com/Rafael-ban/FrameFilm/releases/download/$tag/$name',
+              'https://github.com/$owner/FrameFilm/releases/download/$tag/$name',
         },
     ],
   };
@@ -92,6 +93,39 @@ void main() {
     'size': 100,
     'minSdk': 28,
   };
+
+  for (final owner in ['Rafael-Ikaros', 'Rafael-ban', 'unrelated-owner']) {
+    test('release asset repository allowlist: $owner', () async {
+      final service = AppUpdateService(
+        client: MockClient((request) async {
+          if (request.url.host == 'api.github.com') {
+            expect(request.url.path, '/repos/Rafael-Ikaros/FrameFilm/releases');
+            return http.Response(
+              jsonEncode([release('v4', '2026-01-01T00:00:00Z', owner: owner)]),
+              200,
+            );
+          }
+          expect(request.url.host, 'github.com');
+          expect(
+            request.url.path,
+            '/$owner/FrameFilm/releases/download/v4/$metadata',
+          );
+          return http.Response(jsonEncode(manifest(4)), 200);
+        }),
+      );
+      final found = await service.latest();
+      if (owner == 'unrelated-owner') {
+        expect(found, isNull);
+      } else {
+        expect(
+          found?.url,
+          'https://github.com/$owner/FrameFilm/releases/download/v4/$apk',
+        );
+        expect(found?.sha256, sha);
+      }
+      service.dispose();
+    });
+  }
 
   test('selects exact Flutter APK by versionCode, not release date', () async {
     final service = AppUpdateService(

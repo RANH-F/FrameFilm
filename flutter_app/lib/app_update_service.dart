@@ -37,9 +37,11 @@ class AppUpdateService {
   Future<AppRelease?> latest() async {
     final response = await _client
         .get(
-          Uri.https('api.github.com', '/repos/Rafael-ban/FrameFilm/releases', {
-            'per_page': '20',
-          }),
+          Uri.https(
+            'api.github.com',
+            '/repos/Rafael-Ikaros/FrameFilm/releases',
+            {'per_page': '20'},
+          ),
           headers: {'Accept': 'application/vnd.github+json'},
         )
         .timeout(const Duration(seconds: 20));
@@ -110,7 +112,12 @@ class AppUpdateService {
       if (uri == null ||
           uri.scheme != 'https' ||
           uri.host != 'github.com' ||
-          !uri.path.startsWith('/Rafael-ban/FrameFilm/releases/download/') ||
+          !(uri.path.startsWith(
+                '/Rafael-Ikaros/FrameFilm/releases/download/',
+              ) ||
+              uri.path.startsWith(
+                '/Rafael-ban/FrameFilm/releases/download/',
+              )) ||
           !uri.path.endsWith('/$expectedName')) {
         continue;
       }

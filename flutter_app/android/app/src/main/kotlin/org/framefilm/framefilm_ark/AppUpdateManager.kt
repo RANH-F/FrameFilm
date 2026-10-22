@@ -90,8 +90,9 @@ internal class AppUpdateManager(private val activity: Activity, private val chan
         val url = requireNotNull(call.argument<String>("url")) { "缺少 APK 下载地址" }
         val uri = java.net.URI(url)
         require(uri.scheme == "https" && uri.host.equals("github.com", true) &&
-            uri.rawPath?.startsWith("/Rafael-ban/FrameFilm/releases/download/") == true &&
-            uri.path?.endsWith(".apk", true) == true) { "App 必须来自 Rafael-ban/FrameFilm GitHub Release APK" }
+            (uri.rawPath?.startsWith("/Rafael-Ikaros/FrameFilm/releases/download/") == true ||
+                uri.rawPath?.startsWith("/Rafael-ban/FrameFilm/releases/download/") == true) &&
+            uri.path?.endsWith(".apk", true) == true) { "App 必须来自 Rafael-Ikaros/FrameFilm（或原 Rafael-ban/FrameFilm） GitHub Release APK" }
         val size = requireNotNull(call.argument<Number>("size")).toLong()
         require(size in 1..MAX_SIZE) { "APK 大小必须在 1 B 至 100 MiB 之间" }
         val sha256 = call.argument<String>("sha256")
