@@ -49,6 +49,17 @@ void main() {
       );
     },
   );
+  test('firmware release API uses the canonical repository', () async {
+    final service = GitHubReleaseService(
+      client: MockClient((request) async {
+        expect(request.url.host, 'api.github.com');
+        expect(request.url.path, '/repos/Rafael-Ikaros/FrameFilm/releases');
+        return http.Response('[]', 200);
+      }),
+    );
+    expect(await service.latest(), isNull);
+    service.dispose();
+  });
   test('API errors and malformed responses remain retryable', () async {
     for (final code in [403, 429, 500]) {
       final service = GitHubReleaseService(

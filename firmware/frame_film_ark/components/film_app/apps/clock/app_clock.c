@@ -38,6 +38,7 @@
 #include "hal_epd.h"    /* EPD_WIDTH / EPD_HEIGHT / EPD_PANEL_ID（面板行用） */
 
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "ui_ops.h"     /* app_ui_ops_t（含 lvgl.h） */
 #include "ui_conf.h"    /* UI_LOGICAL_W：正文宽度按屏宽算，不写死 */
 #include "app_shell.h"  /* 顶部状态栏 + 底部提示行 */
@@ -532,9 +533,9 @@ static void clock_ui_create(lv_obj_t *root)
     /* ---- 表头：TIMEKEEPING ──────── DOY 262 / 365 ---- */
     row = clock_box(body, CK_HEADER_Y, CK_HEADER_H);
     clock_row_flex(row, 8);
-    (void)clock_label(row, &ui_font_14, lv_color_black(), app_text("设备时间", "TIMEKEEPING"));
+    (void)clock_label(row, app_font_small(), lv_color_black(), app_text("设备时间", "TIMEKEEPING"));
     (void)clock_hline(row);
-    m_doy_label = clock_label(row, &ui_font_14, lv_color_black(), app_text("年内天数 --- / ---", "DOY --- / ---"));
+    m_doy_label = clock_label(row, app_font_small(), lv_color_black(), app_text("年内天数 --- / ---", "DOY --- / ---"));
     clock_rule(body, CK_RULE1_Y);
 
     /* ---- 主读数：两侧实心三角把视线压向中心 ---- */
@@ -572,9 +573,9 @@ static void clock_ui_create(lv_obj_t *root)
     /* ---- 尺注：MIN 32 / 060 ····· HOUR 14 ---- */
     row = clock_box(body, CK_CAP_Y, CK_CAP_H);
     clock_row_flex(row, 8);
-    m_min_label = clock_label(row, &ui_font_14, lv_color_black(), app_text("分钟 -- / 060", "MIN -- / 060"));
+    m_min_label = clock_label(row, app_font_small(), lv_color_black(), app_text("分钟 -- / 060", "MIN -- / 060"));
     (void)clock_gap(row);
-    m_hour_label = clock_label(row, &ui_font_14, lv_color_black(), app_text("小时 --", "HOUR --"));
+    m_hour_label = clock_label(row, app_font_small(), lv_color_black(), app_text("小时 --", "HOUR --"));
     clock_rule(body, CK_RULE2_Y);
 
     /* ---- 日期行：星期黑标（左下切角）+ 日期 ---- */
@@ -589,7 +590,7 @@ static void clock_ui_create(lv_obj_t *root)
         lv_obj_set_style_bg_color(tab, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, LV_PART_MAIN);
 
-        m_wday_label = clock_label(tab, &ui_font_14, lv_color_white(), "---");
+        m_wday_label = clock_label(tab, app_font_small(), lv_color_white(), "---");
         lv_obj_set_style_text_letter_space(m_wday_label, 4, LV_PART_MAIN);
         lv_obj_center(m_wday_label);
 
@@ -619,7 +620,7 @@ static void clock_ui_create(lv_obj_t *root)
         lv_obj_set_style_border_color(c, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_bg_color(c, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, LV_PART_MAIN);
-        m_wk_code[i] = clock_label(c, &ui_font_14, lv_color_black(), app_text(WK_CODE[i], WK_EN[i]));
+        m_wk_code[i] = clock_label(c, app_font_small(), lv_color_black(), app_text(WK_CODE[i], WK_EN[i]));
         lv_obj_center(m_wk_code[i]);
         m_wk_cell[i] = c;
     }
@@ -627,9 +628,9 @@ static void clock_ui_create(lv_obj_t *root)
     /* ---- 寄存器注：WEEK REGISTER ····· WEEK 38 / 52 ---- */
     row = clock_box(body, CK_WEEKCAP_Y, CK_CAP_H);
     clock_row_flex(row, 8);
-    (void)clock_label(row, &ui_font_14, lv_color_black(), app_text("本周日期", "WEEK REGISTER"));
+    (void)clock_label(row, app_font_small(), lv_color_black(), app_text("本周日期", "WEEK REGISTER"));
     (void)clock_gap(row);
-    m_week_label = clock_label(row, &ui_font_14, lv_color_black(), app_text("第 -- 周 / 52", "WEEK -- / 52"));
+    m_week_label = clock_label(row, app_font_small(), lv_color_black(), app_text("第 -- 周 / 52", "WEEK -- / 52"));
 
     /* ---- 设备面板：1px 描边 + 四角取景标记 + 三行只读遥测 ----
        内容全是编译期常量（面板/固件版本）或设计常量（刷新节奏），
@@ -642,20 +643,20 @@ static void clock_ui_create(lv_obj_t *root)
         uint16_t panel_w = (uint16_t)EPD_WIDTH;
         uint16_t panel_h = (uint16_t)EPD_HEIGHT;
         uint8_t  panel_id = (uint8_t)EPD_PANEL_ID;
-        lv_obj_t *l = clock_label(row, &ui_font_14, lv_color_black(), "");
+        lv_obj_t *l = clock_label(row, app_font_small(), lv_color_black(), "");
 
         lv_label_set_text_fmt(l, app_text("屏幕  E6 %ux%u ID%02X", "PANEL     E6 %ux%u ID%02X"),
                               (unsigned)panel_w, (unsigned)panel_h, (unsigned)panel_id);
         lv_obj_set_pos(l, 0, CK_PANEL_Y0);
     }
     {
-        lv_obj_t *l = clock_label(row, &ui_font_14, lv_color_black(), "");
+        lv_obj_t *l = clock_label(row, app_font_small(), lv_color_black(), "");
 
         lv_label_set_text_fmt(l, app_text("固件  %s %s", "FIRMWARE  %s %s"), SYS_FIRMWARE_VERSION, SYS_HAREWARE_VERSION);
         lv_obj_set_pos(l, 0, CK_PANEL_Y0 + CK_PANEL_PITCH);
     }
     {
-        lv_obj_t *l = clock_label(row, &ui_font_14, lv_color_black(), "");
+        lv_obj_t *l = clock_label(row, app_font_small(), lv_color_black(), "");
 
         /* 刷新节奏见 CLOCK_REFRESH_S：只在"分钟/日"变化时上屏 */
         lv_label_set_text_fmt(l, app_text("刷新  黑白全屏 / %u 秒", "REFRESH   MONO FULL FRAME / %u S"), (unsigned)CLOCK_REFRESH_S);

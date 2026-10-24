@@ -1163,8 +1163,9 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         require(displayName == "frame_film_ark.bin") { "请选择原始 frame_film_ark.bin 资产" }
         val target = java.net.URI(url)
         require(target.scheme == "https" && target.host.equals("github.com", true) &&
-            target.rawPath?.startsWith("/Rafael-ban/FrameFilm/releases/download/") == true &&
-            target.rawPath?.endsWith("/frame_film_ark.bin") == true) { "固件必须来自 Rafael-ban/FrameFilm Release" }
+            (target.rawPath?.startsWith("/Rafael-Ikaros/FrameFilm/releases/download/") == true ||
+                target.rawPath?.startsWith("/Rafael-ban/FrameFilm/releases/download/") == true) &&
+            target.rawPath?.endsWith("/frame_film_ark.bin") == true) { "固件必须来自 Rafael-Ikaros/FrameFilm（或原 Rafael-ban/FrameFilm） Release" }
         val size = requireNotNull(call.argument<Number>("size")) { "缺少固件大小" }.toLong()
         require(size in 1..FirmwareDownloader.MAX_SIZE) { "固件大小必须在 1 B 至 4 MiB 之间" }
         val sha256 = call.argument<String>("sha256")

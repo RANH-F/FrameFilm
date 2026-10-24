@@ -47,6 +47,7 @@
 #include "app_shell.h"
 #include "app_language.h"
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "ui_boot_logo.h"
 #include "app_manager.h"
 
@@ -317,8 +318,16 @@ void app_shell_build(lv_obj_t *root, const char *hint, const char *page, app_she
 void app_shell_set_text(app_shell_t *s, const char *hint, const char *page)
 {
     if(s == NULL) return;
-    if(s->hint_label != NULL) lv_label_set_text(s->hint_label, hint);
-    if(s->page_label != NULL) lv_label_set_text(s->page_label, page);
+    if(s->hint_label != NULL)
+    {
+        lv_obj_set_style_text_font(s->hint_label, app_font_small_text(hint), LV_PART_MAIN);
+        lv_label_set_text(s->hint_label, hint);
+    }
+    if(s->page_label != NULL)
+    {
+        lv_obj_set_style_text_font(s->page_label, app_font_small_text(page), LV_PART_MAIN);
+        lv_label_set_text(s->page_label, page);
+    }
 }
 
 void app_shell_request_status(void)
@@ -375,7 +384,8 @@ lv_obj_t *app_shell_brandmark(lv_obj_t *parent)
     if(quote != NULL)
     {
         lv_obj_t *word = shell_label(mark, lv_color_black(), quote);
-        lv_obj_set_style_text_font(word, &ui_font_14, 0);
+        lv_obj_set_style_text_font(word, app_font_small_text(quote), 0);
+        if(!english) lv_obj_set_style_text_letter_space(word, -1, LV_PART_MAIN);
         lv_obj_set_width(word, 440);
         lv_obj_set_style_text_align(word, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(word, LV_LABEL_LONG_WRAP);

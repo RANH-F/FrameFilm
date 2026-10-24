@@ -31,6 +31,7 @@ add_executable(ark-ui-simulator
     "${ARK_ROOT}/components/film_app/apps/clock/app_clock.c"
     "${ARK_ROOT}/components/film_app/apps/clock/font_clock_hero.c"
     "${ARK_ROOT}/components/film_app/core/app_shell.c"
+    "${ARK_ROOT}/components/film_app/core/app_typography.c"
     "${ARK_ROOT}/components/film_ui/src/ui_assets.c"
     "${ARK_ROOT}/components/film_ui/src/ui_defaults.c"
     "${ARK_ROOT}/components/film_ui/src/ui_fonts.c"
