@@ -45,6 +45,7 @@
 #include "ui_conf.h"    /* UI_CMD_DATA_MAX（快照尺寸断言） */
 #include "ui_ops.h"
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "app_shell.h"
 #include "app_image.h"      /* 图片 app 参数 TAG / 取值范围（app 参数行用） */
 #include "app_animation.h"  /* 动图 app 参数 TAG / 取值范围 */
@@ -665,8 +666,7 @@ static void set_apply(void)
         {
             lv_obj_set_style_text_color(m_row_key[i], fg, LV_PART_MAIN);
             lv_label_set_text(m_row_key[i], app_text(r->key, ROW_KEYS_EN[i]));
-            lv_obj_set_style_text_font(m_row_key[i], app_language_get() == APP_LANGUAGE_EN ?
-                                       &lv_font_montserrat_14 : &ui_font_14, LV_PART_MAIN);
+            lv_obj_set_style_text_font(m_row_key[i], app_font_small(), LV_PART_MAIN);
         }
         if(m_row_ptr[i] != NULL)
         {
@@ -678,9 +678,7 @@ static void set_apply(void)
         {
             lv_obj_set_style_text_color(m_row_val[i], fg, LV_PART_MAIN);
             lv_obj_set_style_text_font(m_row_val[i],
-                                       app_language_get() == APP_LANGUAGE_EN &&
-                                       !(r->field == F_LANGUAGE && m_snap.language_sel == APP_LANGUAGE_ZH_CN) ?
-                                       &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+                                       app_font_small_text(row_text(i)), LV_PART_MAIN);
             /* 开关行的 ON/OFF 由下面的开关块分支接管，其余（含电量条的 "82%"）都取快照文本 */
             if(r->kind != SET_KIND_TOGGLE)
             {
@@ -708,7 +706,7 @@ static void set_apply(void)
         {
             /* 开关行左侧的状态文案（WiFi / 蓝牙）：取设备侧真实状态，随快照刷新 */
             lv_obj_set_style_text_color(m_row_st[i], fg, LV_PART_MAIN);
-            lv_obj_set_style_text_font(m_row_st[i], app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+            lv_obj_set_style_text_font(m_row_st[i], app_font_small(), LV_PART_MAIN);
             lv_label_set_text(m_row_st[i], row_text(i));
         }
         if(m_row_fill[i] != NULL)
@@ -721,7 +719,7 @@ static void set_apply(void)
 
     if(m_row_idx_label != NULL)
     {
-        lv_obj_set_style_text_font(m_row_idx_label, app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(m_row_idx_label, app_font_small(), LV_PART_MAIN);
         if(m_sel < SETTINGS_ROW_NUM)
         {
             lv_label_set_text_fmt(m_row_idx_label, app_text("第 %02u / %02u 项", "ROW %02u / %02u"),
@@ -736,14 +734,14 @@ static void set_apply(void)
     if(m_head_label != NULL)
     {
         lv_label_set_text(m_head_label, app_text("系统设置", "SYSTEM CONFIGURATION"));
-        lv_obj_set_style_text_font(m_head_label, app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+        lv_obj_set_style_text_font(m_head_label, app_font_small(), LV_PART_MAIN);
     }
     for(i = 0; i < 3; i++)
     {
         if(m_sec_label[i] != NULL)
         {
             lv_label_set_text(m_sec_label[i], app_text(SEC_TITLES[i], SEC_EN[i]));
-            lv_obj_set_style_text_font(m_sec_label[i], app_language_get() ? &lv_font_unscii_8 : &ui_font_14, LV_PART_MAIN);
+            lv_obj_set_style_text_font(m_sec_label[i], app_font_small(), LV_PART_MAIN);
         }
     }
     app_shell_set_text(&m_shell,
@@ -866,8 +864,8 @@ static void set_ui_create(lv_obj_t *root)
     lv_obj_set_scrollable(head, false);
     lv_obj_set_size(head, LV_PCT(100), 16);
     lv_obj_set_pos(head, 0, 0);
-    m_head_label = set_label(head, &ui_font_14, lv_color_black(), app_text("系统设置", "SYSTEM CONFIGURATION"));
-    m_row_idx_label = set_label(head, &ui_font_14, lv_color_black(), "");
+    m_head_label = set_label(head, app_font_small(), lv_color_black(), app_text("系统设置", "SYSTEM CONFIGURATION"));
+    m_row_idx_label = set_label(head, app_font_small(), lv_color_black(), "");
     lv_obj_align(m_row_idx_label, LV_ALIGN_TOP_RIGHT, 0, 0);
 
     list = lv_obj_create(body);
@@ -902,7 +900,7 @@ static void set_ui_create(lv_obj_t *root)
             lv_obj_set_style_bg_color(tab, lv_color_black(), LV_PART_MAIN);
             lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, LV_PART_MAIN);
             {
-                lv_obj_t *t = set_label(tab, &ui_font_14, lv_color_white(),
+                lv_obj_t *t = set_label(tab, app_font_small(), lv_color_white(),
                                         app_text(SEC_TITLES[cur_sec], SEC_EN[cur_sec]));
                 lv_obj_center(t);
                 m_sec_label[cur_sec] = t;
@@ -943,7 +941,7 @@ static void set_ui_create(lv_obj_t *root)
 
         {
             /* 原版 29px 行高与行位置不变；中文字使用等尺寸字库。 */
-            lv_obj_t *k = set_label(row, &ui_font_14, lv_color_black(), app_text(r->key, ROW_KEYS_EN[i]));
+            lv_obj_t *k = set_label(row, app_font_small(), lv_color_black(), app_text(r->key, ROW_KEYS_EN[i]));
 
             lv_obj_align(k, LV_ALIGN_LEFT_MID, 14, 0);
             m_row_key[i] = k;   // 选中行整行反白时，键名要跟着变白
@@ -971,7 +969,7 @@ static void set_ui_create(lv_obj_t *root)
             lv_obj_align(fill, LV_ALIGN_LEFT_MID, 0, 0);
             m_row_fill[i] = fill;
 
-            m_row_val[i] = set_label(row, &ui_font_14, lv_color_black(), "");
+            m_row_val[i] = set_label(row, app_font_small(), lv_color_black(), "");
             lv_obj_align(m_row_val[i], LV_ALIGN_RIGHT_MID, 0, 0);
         }
         else if(r->kind == SET_KIND_TOGGLE)
@@ -987,21 +985,21 @@ static void set_ui_create(lv_obj_t *root)
             lv_obj_align(tog, LV_ALIGN_RIGHT_MID, 0, 0);
             m_row_tog[i] = tog;
 
-            t = set_label(tog, &ui_font_14, lv_color_black(), "开");
+            t = set_label(tog, app_font_small(), lv_color_black(), "开");
             lv_obj_center(t);
             m_row_val[i] = t;
 
             /* 开关行左侧的状态文案（WiFi / 蓝牙：状态 + 开关同一行） */
             if(ROWS[i].field == F_WIFI_ON || ROWS[i].field == F_BT_ON)
             {
-                lv_obj_t *st = set_label(row, &ui_font_14, lv_color_black(), "");
+                lv_obj_t *st = set_label(row, app_font_small(), lv_color_black(), "");
                 lv_obj_align(st, LV_ALIGN_RIGHT_MID, -48, 0);
                 m_row_st[i] = st;   // 文字与颜色由 set_apply 按快照刷新
             }
         }
         else
         {
-            m_row_val[i] = set_label(row, &ui_font_14, lv_color_black(), "");
+            m_row_val[i] = set_label(row, app_font_small(), lv_color_black(), "");
             lv_obj_set_width(m_row_val[i], 220);
             lv_label_set_long_mode(m_row_val[i], LV_LABEL_LONG_DOT);
             lv_obj_set_style_text_align(m_row_val[i], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);

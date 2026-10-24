@@ -37,9 +37,11 @@ class GitHubReleaseService {
   Future<GitHubFirmwareRelease?> latest() async {
     final response = await _client
         .get(
-          Uri.https('api.github.com', '/repos/Rafael-ban/FrameFilm/releases', {
-            'per_page': '20',
-          }),
+          Uri.https(
+            'api.github.com',
+            '/repos/Rafael-Ikaros/FrameFilm/releases',
+            {'per_page': '20'},
+          ),
           headers: {'Accept': 'application/vnd.github+json'},
         )
         .timeout(const Duration(seconds: 20));

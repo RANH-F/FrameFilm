@@ -1,51 +1,45 @@
 #!/usr/bin/env python3
-"""Generate compact, 1-bpp LVGL fonts from Ark UI string literals.
-
-Uses the Source Han Sans SC font and OFL license bundled with Ark's LVGL.
-Run from any directory with Python 3.10+ and Pillow installed.
-"""
-
+"""Generate compact 1-bpp Ark UI fonts from official Source Han Sans CN."""
 import argparse
 import re
 from pathlib import Path
-
 from PIL import Image, ImageDraw, ImageFont
-
 
 ROOT = Path(__file__).resolve().parents[2]
 ARK = ROOT / "firmware/frame_film_ark"
-FONT_ROOT = ARK / "managed_components/lvgl__lvgl/scripts/generators/built_in_font"
-SOURCE = FONT_ROOT / "SourceHanSansSC-Normal.otf"
+APP = ARK / "components/film_app"
 OUT = ARK / "components/film_ui/src/ui_fonts.c"
-SIZES = (14, 18, 24, 36)
-# Large fonts only serve these headings. Keep their explicit glyph set small:
-# Ark has two 1900-KiB OTA slots; duplicating every small-text glyph wastes flash.
+BODY = ROOT / ".output/ark/SourceHanSansCN-Bold.otf"
+TITLE = ROOT / ".output/ark/SourceHanSansCN-Medium.otf"
 LARGE_TEXT = {
     24: "图片通行证模板时钟动图设置IMAGEPASSTEMPLATECLOCKANIMATIONSETTINGS",
     36: "通行证已休眠PASSSTANDBY",
 }
+TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
-
-def characters() -> list[str]:
-    """Include printable ASCII plus non-ASCII literals in actual UI sources."""
-    chars = set(map(chr, range(32, 127)))
-    files = list((ARK / "components/film_app/pages").glob("*.c"))
-    files += [ARK / "components/film_app/core/app_shell.c"]
-    files += list((ARK / "components/film_app/apps").glob("*/app_*.c"))
-    token = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+def characters() -> list[int]:
+    """Keep the original page, shell and app sources; include core UI strings."""
+    chars = set(range(32, 127))
+    chars.update(map(ord, "—℃"))
+    files = list((APP / "pages").glob("*.c"))
+    files += list((APP / "core").glob("*.c"))
+    files += list((APP / "core").glob("*.h"))
+    files += list((APP / "apps").glob("*/app_*.c"))
+    files += list((APP / "apps").glob("*/app_*.h"))
     for path in files:
-        for match in token.finditer(path.read_text(encoding="utf-8")):
+        for match in TOKEN.finditer(path.read_text(encoding="utf-8")):
             literal = match.group()
             if literal.startswith('"'):
-                chars.update(c for c in literal if 127 < ord(c) < 65536)
-    return sorted(chars, key=ord)
+                chars.update(ord(c) for c in literal if 127 < ord(c) < 65536)
+    return sorted(chars)
 
-
-def emit_font(size: int, chars: list[str]) -> tuple[str, int]:
-    font = ImageFont.truetype(str(SOURCE), size)
+def emit_font(name: int, font_path: Path, pixels: int,
+              chars: list[int], line: int, cap: int) -> tuple[str, int]:
+    font = ImageFont.truetype(str(font_path), pixels)
     bitmap = bytearray()
     descriptors = ["    {0},"]
-    for char in chars:
+    for codepoint in chars:
+        char = chr(codepoint)
         x0, y0, x1, y1 = font.getbbox(char, anchor="ls")
         width, height = x1 - x0, y1 - y0
         image = Image.new("L", (max(1, width), max(1, height)))
@@ -53,23 +47,23 @@ def emit_font(size: int, chars: list[str]) -> tuple[str, int]:
             (-x0, -y0), char, font=font, fill=255, anchor="ls"
         )
         packed = bytearray((width * height + 7) // 8)
-        for index, value in enumerate(image.tobytes()[: width * height]):
-            if value >= 96:
+        for index, value in enumerate(image.tobytes()[:width * height]):
+            if value >= 128:
                 packed[index // 8] |= 0x80 >> (index % 8)
         descriptors.append(
             "    {.bitmap_index = %d, .adv_w = %d, .box_w = %d, "
             ".box_h = %d, .ofs_x = %d, .ofs_y = %d}, /* U+%04X */"
             % (len(bitmap), round(font.getlength(char) * 16), width,
-               height, x0, -y1, ord(char))
+               height, x0, -y1, codepoint)
         )
         bitmap.extend(packed)
-    prefix = f"font_{size}"
+    prefix = f"font_{name}"
     rows = [
         "    " + ", ".join(f"0x{v:02x}" for v in bitmap[i:i + 16]) + ","
         for i in range(0, len(bitmap), 16)
     ]
-    offsets = ", ".join(str(ord(c) - 32) for c in chars)
-    result = f"""
+    offsets = ", ".join(str(codepoint - chars[0]) for codepoint in chars)
+    source = f"""
 static const uint8_t {prefix}_bitmap[] = {{
 {chr(10).join(rows)}
 }};
@@ -78,7 +72,7 @@ static const lv_font_fmt_txt_glyph_dsc_t {prefix}_glyphs[] = {{
 }};
 static const uint16_t {prefix}_unicodes[] = {{{offsets}}};
 static const lv_font_fmt_txt_cmap_t {prefix}_cmap[] = {{{{
-    .range_start = 32, .range_length = {ord(chars[-1]) - 31},
+    .range_start = {chars[0]}, .range_length = {chars[-1] - chars[0] + 1},
     .glyph_id_start = 1, .unicode_list = {prefix}_unicodes,
     .list_length = {len(chars)}, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
 }}}};
@@ -87,41 +81,50 @@ static const lv_font_fmt_txt_dsc_t {prefix}_dsc = {{
     .cmaps = {prefix}_cmap, .cmap_num = 1, .bpp = 1,
     .bitmap_format = LV_FONT_FMT_TXT_PLAIN, .stride = 0
 }};
-const lv_font_t ui_font_{size} = {{
+const lv_font_t ui_font_{name} = {{
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,
     .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,
-    .line_height = {size + 4}, .base_line = 4,
-    .cap_height = {size}, .x_height = {size * 2 // 3},
+    .line_height = {line}, .base_line = 4,
+    .cap_height = {cap}, .x_height = {cap * 2 // 3},
     .subpx = LV_FONT_SUBPX_NONE, .kerning = LV_FONT_KERNING_NONE,
     .static_bitmap = 1, .underline_position = -2,
     .underline_thickness = 1, .dsc = &{prefix}_dsc
 }};
 """
-    return result, len(bitmap)
-
+    return source, len(bitmap)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="check generated output")
+    parser.add_argument("--body-font", type=Path, default=BODY)
+    parser.add_argument("--title-font", type=Path, default=TITLE)
     args = parser.parse_args()
-    chars = characters()
+    for path in (args.body_font, args.title_font):
+        if not path.is_file():
+            parser.error(f"Font not found: {path}")
+    all_chars = characters()
     output = (
         "/* Generated by tools/ark-font/gen_fonts.py; do not edit.\n"
-        " * Ark UI subset derived from Source Han Sans SC (SIL OFL 1.1).\n"
-        " * License: tools/ark-font/OFL.txt; 1-bpp, continuous packed rows. */\n"
+        " * Source Han Sans CN Bold 16/18px; Medium 24/36px.\n"
+        " * Adobe SIL OFL 1.1; license: tools/ark-font/OFL.txt.\n"
+        " * 1-bpp, threshold 128, native-size packed rows. */\n"
         '#include "ui_fonts.h"\n'
     )
-    for size in SIZES:
-        size_chars = sorted(set(LARGE_TEXT[size]), key=ord) if size in LARGE_TEXT else chars
-        source, count = emit_font(size, size_chars)
+    for name, font_path, pixels, line, cap in (
+        (14, args.body_font, 16, 18, 14),
+        (18, args.body_font, 18, 22, 18),
+        (24, args.title_font, 24, 28, 24),
+        (36, args.title_font, 36, 40, 36),
+    ):
+        chars = sorted({ord(c) for c in LARGE_TEXT[name]}) if name in LARGE_TEXT else all_chars
+        source, count = emit_font(name, font_path, pixels, chars, line, cap)
         output += source
-        print(f"{size}px: {len(size_chars)} glyphs, {count} bitmap bytes")
+        print(f"ui_font_{name}: {len(chars)} glyphs, {count} bitmap bytes")
     if args.check:
         if not OUT.exists() or OUT.read_text(encoding="utf-8") != output:
-            raise SystemExit("UI font is stale; run gen_fonts.py")
+            raise SystemExit("UI font output is stale; run gen_fonts.py")
     else:
         OUT.write_text(output, encoding="utf-8", newline="\n")
-
 
 if __name__ == "__main__":
     main()

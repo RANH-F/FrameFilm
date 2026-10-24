@@ -42,6 +42,7 @@
 #include "ui_core.h"
 #include "ui_assets.h"
 #include "ui_fonts.h"
+#include "app_typography.h"
 #include "ui_ops.h"
 #include "app_shell.h"
 #include "app_language.h"
@@ -184,7 +185,7 @@ static void sleep_ui_create(lv_obj_t *root)
     lv_obj_align(o, LV_ALIGN_TOP_MID, 0, SP_BADGE_Y);
 
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &ui_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, app_font_small(), LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_label_set_text(o, "PRTS SYNTHESIZE INFORMATION ANALYSIS OS");
     lv_obj_align(o, LV_ALIGN_TOP_MID, 0, SP_BADGE_Y + APP_SHELL_BRAND_H + 12);
@@ -193,7 +194,7 @@ static void sleep_ui_create(lv_obj_t *root)
     sleep_rule(root, SP_RULE1_Y);
 
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &ui_font_36, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, app_font_hero(), LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_WORD_LS, LV_PART_MAIN);
     lv_label_set_text(o, app_text("已休眠", "STANDBY"));
@@ -203,7 +204,7 @@ static void sleep_ui_create(lv_obj_t *root)
 
     /* ---- 唤醒说明 ---- */
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &ui_font_18, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, app_font_body(), LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_MICRO_LS, LV_PART_MAIN);
     lv_label_set_text(o, app_text("按确认键唤醒", "PRESS ENTER TO WAKE"));
@@ -212,7 +213,7 @@ static void sleep_ui_create(lv_obj_t *root)
     /* ---- 页脚：锚在屏幕底边，不参与居中构图 ---- */
     sleep_foot_text(buf);
     o = lv_label_create(root);
-    lv_obj_set_style_text_font(o, &ui_font_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(o, app_font_small(), LV_PART_MAIN);
     lv_obj_set_style_text_color(o, lv_color_black(), LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(o, SP_MICRO_LS, LV_PART_MAIN);
     lv_label_set_text(o, buf);
