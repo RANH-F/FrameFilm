@@ -12,6 +12,10 @@ set(public_include "inc")
 
 set(requires film_sys led_strip driver fatfs esp_adc button esp_wifi esp_netif esp_event)
 
+if(CONFIG_ARK_EPD_PROFILE)
+    list(APPEND requires esp_timer)
+endif()
+
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS ${public_include}
                        REQUIRES ${requires}

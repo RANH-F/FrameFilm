@@ -36,6 +36,12 @@
 
 #include "sys_log.h"
 #include <stdint.h>
+#include "sdkconfig.h"
+
+#ifdef CONFIG_ARK_EPD_PROFILE
+#include "esp_timer.h"
+#include <inttypes.h>
+#endif
 
 /*********************************************************************
  * MACROS
@@ -609,6 +615,120 @@ static uint8_t m_mono_prev[EPD_MONO_BYTES];  // 黑白快刷上一帧（bit-reve
 static bool m_panel_powered = false;         // 面板 DC/DC 是否上电（PON 后、POF 前）；硬复位/深睡会清掉
 static bool m_mono_session = false;          // 黑白快刷会话：打开时帧间保持上电（见 hal_epd_mono_session_begin）
 
+/* Profiling owns only the two public mono/8bpp driver calls below. The existing
+ * driver is serialized by its callers; internal helpers must not start a frame.
+ * Stages are exclusive, including preparation passes, and retain original delays.
+ * This measures driver calls, not decoding/UI/queue time or end-to-end FPS. */
+#ifdef CONFIG_ARK_EPD_PROFILE
+typedef enum {
+    EPD_PROFILE_OTHER, EPD_PROFILE_INIT, EPD_PROFILE_LUT, EPD_PROFILE_RAM,
+    EPD_PROFILE_REF, EPD_PROFILE_PON, EPD_PROFILE_POF, EPD_PROFILE_STAGE_COUNT
+} epd_profile_stage_t;
+
+static struct {
+    bool active;
+    const char *path;
+    int64_t started_us;
+    int64_t stage_us[EPD_PROFILE_STAGE_COUNT];
+    epd_profile_stage_t stage;
+    uint32_t bytes, lut_bytes, ram_bytes, stages, timeouts, spi_errors;
+    esp_err_t first_error;
+    bool first_prepare, mono_session, busy_ignored;
+} m_profile;
+
+static void epd_profile_begin(const char *path)
+{
+    memset(&m_profile, 0, sizeof(m_profile));
+    m_profile.path = path;
+    m_profile.mono_session = m_mono_session;
+    m_profile.busy_ignored = m_ignore_busy;
+    m_profile.active = true;
+    m_profile.started_us = esp_timer_get_time();
+}
+
+static int64_t epd_profile_stage_begin(epd_profile_stage_t stage)
+{
+    if (!m_profile.active) return 0;
+    m_profile.stage = stage;
+    return esp_timer_get_time();
+}
+
+static void epd_profile_stage_end(epd_profile_stage_t stage, int64_t started_us)
+{
+    if (!m_profile.active) return;
+    m_profile.stage_us[stage] += esp_timer_get_time() - started_us;
+    m_profile.stage = EPD_PROFILE_OTHER;
+}
+
+static void epd_profile_error(esp_err_t err, bool timeout)
+{
+    if (!m_profile.active) return;
+    if (m_profile.first_error == ESP_OK) m_profile.first_error = err;
+    if (timeout) m_profile.timeouts++;
+}
+
+static void epd_profile_spi(esp_err_t err, uint32_t bytes, bool payload)
+{
+    if (!m_profile.active) return;
+    if (err != ESP_OK) {
+        m_profile.spi_errors++;
+        epd_profile_error(err, false);
+        return;
+    }
+    m_profile.bytes += bytes;
+    if (payload && m_profile.stage == EPD_PROFILE_LUT) m_profile.lut_bytes += bytes;
+    if (payload && m_profile.stage == EPD_PROFILE_RAM) m_profile.ram_bytes += bytes;
+}
+
+static void epd_profile_end(void)
+{
+    const int64_t total_us = esp_timer_get_time() - m_profile.started_us;
+    int64_t other_us = total_us;
+    for (int i = EPD_PROFILE_INIT; i < EPD_PROFILE_STAGE_COUNT; i++)
+        other_us -= m_profile.stage_us[i];
+    const bool ok = m_profile.first_error == ESP_OK && !m_profile.busy_ignored;
+    m_profile.active = false;  /* Serial logging is outside the timed call. */
+    ESP_LOGI(EPD_TAG, "EPD_PROFILE {\"path\":\"%s\",\"scope\":\"driver_call\",\"unit\":\"us\","
+             "\"started_us\":%" PRId64 ",\"total_us\":%" PRId64 ","
+             "\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
+             "\"ref_us\":%" PRId64 ",\"pon_us\":%" PRId64 ",\"pof_us\":%" PRId64 ",\"other_us\":%" PRId64 ","
+             "\"bytes\":%" PRIu32 ",\"lut_bytes\":%" PRIu32 ",\"ram_bytes\":%" PRIu32 ","
+             "\"stages\":%" PRIu32 ",\"first_prepare\":%s,\"mono_session\":%s,"
+             "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"first_error\":%d,"
+             "\"busy_ignored\":%s,\"ok\":%s}",
+             m_profile.path, m_profile.started_us, total_us,
+             m_profile.stage_us[EPD_PROFILE_INIT], m_profile.stage_us[EPD_PROFILE_LUT],
+             m_profile.stage_us[EPD_PROFILE_RAM], m_profile.stage_us[EPD_PROFILE_REF],
+             m_profile.stage_us[EPD_PROFILE_PON], m_profile.stage_us[EPD_PROFILE_POF], other_us,
+             m_profile.bytes, m_profile.lut_bytes, m_profile.ram_bytes, m_profile.stages,
+             m_profile.first_prepare ? "true" : "false", m_profile.mono_session ? "true" : "false",
+             m_profile.timeouts, m_profile.spi_errors, (int)m_profile.first_error,
+             m_profile.busy_ignored ? "true" : "false", ok ? "true" : "false");
+}
+
+#define EPD_PROFILE_BEGIN(path) epd_profile_begin(path)
+#define EPD_PROFILE_END() epd_profile_end()
+#define EPD_PROFILE_STAGE_BEGIN(name) \
+    const int64_t profile_##name##_started_us = epd_profile_stage_begin(EPD_PROFILE_##name)
+#define EPD_PROFILE_STAGE_END(name) \
+    epd_profile_stage_end(EPD_PROFILE_##name, profile_##name##_started_us)
+#define EPD_PROFILE_SPI(call, bytes, payload) epd_profile_spi((call), (bytes), (payload))
+#define EPD_PROFILE_ERROR(err) epd_profile_error((err), false)
+#define EPD_PROFILE_TIMEOUT() epd_profile_error(ESP_ERR_TIMEOUT, true)
+#define EPD_PROFILE_PREPARE() do { if (m_profile.active) m_profile.first_prepare = true; } while (0)
+#define EPD_PROFILE_REF_COUNT() do { if (m_profile.active) m_profile.stages++; } while (0)
+#else
+#define EPD_PROFILE_BEGIN(path) ((void)0)
+#define EPD_PROFILE_END() ((void)0)
+#define EPD_PROFILE_STAGE_BEGIN(name) ((void)0)
+#define EPD_PROFILE_STAGE_END(name) ((void)0)
+#define EPD_PROFILE_SPI(call, bytes, payload) ((void)(call))
+#define EPD_PROFILE_ERROR(err) ((void)0)
+#define EPD_PROFILE_TIMEOUT() ((void)0)
+#define EPD_PROFILE_PREPARE() ((void)0)
+#define EPD_PROFILE_REF_COUNT() ((void)0)
+#endif
+
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
@@ -681,7 +801,7 @@ static void EPD_W21_WriteCMD(unsigned char command)
     memset(&t, 0, sizeof(t));
     t.length = 8;
     t.tx_buffer = &command;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), 1, false);
     EPD_W21_CS_1;
 }
 
@@ -693,7 +813,7 @@ static void EPD_W21_WriteDATA(unsigned char datas)
     memset(&t, 0, sizeof(t));
     t.length = 8;
     t.tx_buffer = &datas;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), 1, false);
     EPD_W21_CS_1;
 }
 
@@ -705,7 +825,7 @@ static void EPD_W21_WriteDATA_Bulk(const unsigned char *data, uint32_t len)
     memset(&t, 0, sizeof(t));
     t.length = len * 8;
     t.tx_buffer = data;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), len, true);
     EPD_W21_CS_1;
 }
 
@@ -729,6 +849,7 @@ static bool epd_wait_busy(uint32_t timeout_ms)
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > timeout_ms)
         {
             sys_logw(EPD_TAG, "wait busy timeout (active_low=%d)", m_busy_active_low ? 1 : 0);
+            EPD_PROFILE_TIMEOUT();
             return false;
         }
     }
@@ -879,16 +1000,20 @@ static void epd_display_solid(unsigned char color_byte)
 
 static void epd_spectra_wave(const uint8_t *lut)
 {
+    EPD_PROFILE_STAGE_BEGIN(LUT);
     // 波形载入前导 + 799 字节波形表（末尾对齐字节不进入 SPI）
     EPD_W21_WriteCMD(JD7601_CMD_WAVE_PRE);
     EPD_W21_WriteDATA(0x0F);
     EPD_W21_WriteDATA(0xA9);
     EPD_W21_WriteCMD(JD7601_CMD_WRITE_LUT);
     EPD_W21_WriteDATA_Bulk(lut, 799);
+    EPD_PROFILE_STAGE_END(LUT);
 }
 
 static void epd_spectra_init(void)
 {
+    EPD_PROFILE_STAGE_BEGIN(INIT);
+    EPD_PROFILE_PREPARE();
     // 复位序列（双脉冲），BUSY 极性沿用默认（低电平忙）
     EPD_W21_RST_0; vTaskDelay(20 / portTICK_PERIOD_MS);
     EPD_W21_RST_1; vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -912,6 +1037,7 @@ static void epd_spectra_init(void)
 
     m_spectra_state = 0;
     m_panel_powered = false;   // 复位序列后面板回到未上电态
+    EPD_PROFILE_STAGE_END(INIT);
 }
 
 // wait_cycle：先等 BUSY 拉低（进入忙），再等拉高（释放）
@@ -928,6 +1054,7 @@ static void epd_spectra_wait_cycle(uint32_t assert_timeout_ms, uint32_t release_
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > assert_timeout_ms)
         {
             sys_logw(EPD_TAG, "spectra busy assert timeout");
+            EPD_PROFILE_TIMEOUT();
             return;
         }
     }
@@ -940,6 +1067,7 @@ static void epd_spectra_wait_cycle(uint32_t assert_timeout_ms, uint32_t release_
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > release_timeout_ms)
         {
             sys_logw(EPD_TAG, "spectra busy release timeout");
+            EPD_PROFILE_TIMEOUT();
             return;
         }
     }
@@ -958,12 +1086,14 @@ static void epd_spectra_power_off(void)
         return;
     }
 
+    EPD_PROFILE_STAGE_BEGIN(POF);
     EPD_W21_WriteCMD(POF);   // 0x02
     EPD_W21_WriteDATA(0x00);
     epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_POWER_MS);
     vTaskDelay(20 / portTICK_PERIOD_MS);
 
     m_panel_powered = false;
+    EPD_PROFILE_STAGE_END(POF);
 }
 
 static void epd_spectra_refresh(bool power_on, bool power_off)
@@ -971,16 +1101,22 @@ static void epd_spectra_refresh(bool power_on, bool power_off)
     /* PON 幂等：会话内已上电就不再付一次 PON 的 BUSY 等待（实测约 100ms/次） */
     if (power_on && !m_panel_powered)
     {
+        EPD_PROFILE_STAGE_BEGIN(PON);
         EPD_W21_WriteCMD(PON);   // 0x04
         epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_POWER_MS);
         vTaskDelay(10 / portTICK_PERIOD_MS);
         m_panel_powered = true;
+        EPD_PROFILE_STAGE_END(PON);
     }
 
+    EPD_PROFILE_STAGE_BEGIN(REF);
+    EPD_PROFILE_REF_COUNT();
     EPD_W21_WriteCMD(REF);   // 0x12
     EPD_W21_WriteDATA(0x00);
     epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_REFRESH_MS);
     vTaskDelay(10 / portTICK_PERIOD_MS);
+
+    EPD_PROFILE_STAGE_END(REF);
 
     if (power_off)
     {
@@ -991,6 +1127,7 @@ static void epd_spectra_refresh(bool power_on, bool power_off)
 // 写入一整帧（172800 字节 = 480 行 x 360 字节）的填充值
 static void epd_spectra_fill(uint8_t fill_byte)
 {
+    EPD_PROFILE_STAGE_BEGIN(RAM);
     uint8_t line[EPD_INPUT_LINE];
     memset(line, fill_byte, EPD_INPUT_LINE);
 
@@ -1001,11 +1138,13 @@ static void epd_spectra_fill(uint8_t fill_byte)
         EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
     }
 
+    EPD_PROFILE_STAGE_END(RAM);
     epd_spectra_refresh(true, true);
 }
 
 static void epd_spectra_full_clear(void)
 {
+    EPD_PROFILE_PREPARE();
     epd_spectra_wave(full_clear);
     epd_spectra_fill(0x00);
     memset(m_mono_prev, MONO_CODE_INIT_BYTE, EPD_MONO_BYTES);   // 清屏后面板为黑，上一帧按黑复位
@@ -1028,6 +1167,7 @@ static void epd_spectra_encode_row(const uint8_t *row, uint8_t plane, uint8_t *o
 // 写一个平面的整帧数据（输入为 8bpp 索引缓冲）
 static void epd_spectra_write_plane(const uint8_t *index8, uint8_t plane)
 {
+    EPD_PROFILE_STAGE_BEGIN(RAM);
     uint8_t line[EPD_INPUT_LINE];
 
     EPD_W21_WriteCMD(DTM1);   // 0x10
@@ -1037,6 +1177,7 @@ static void epd_spectra_write_plane(const uint8_t *index8, uint8_t plane)
         epd_spectra_encode_row(index8 + row * EPD_WIDTH, plane, line);
         EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
     }
+    EPD_PROFILE_STAGE_END(RAM);
 }
 
 // 彩色多相位刷新：mode 0 = ColorFast(2 相), 1 = ColorQual(3 相)
@@ -1373,6 +1514,7 @@ static uint8_t epd_spectra_mono_code_byte(uint8_t bitmap_byte)
 // 上一帧初值按各分支实际得到的画面复位：清屏为黑 → INIT_BYTE；写白帧 → mono_write 自身已更新
 static void epd_spectra_prepare(void)
 {
+    EPD_PROFILE_PREPARE();
     if (m_spectra_state == 0)
     {
         // native/quality → 全清理（内部已把上一帧复位为黑）
@@ -1398,6 +1540,7 @@ static void epd_spectra_prepare(void)
 // 写一帧黑白差分数据。mono_bitmap 为 NULL 时表示全白（清屏）
 static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
 {
+    EPD_PROFILE_STAGE_BEGIN(RAM);
     uint8_t line[EPD_INPUT_LINE];
 
     EPD_W21_WriteCMD(DTM1);   // 0x10
@@ -1421,6 +1564,7 @@ static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
         }
         EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
     }
+    EPD_PROFILE_STAGE_END(RAM);
 }
 
 static void epd_spectra_mono_display(const uint8_t *mono_bitmap, bool is_clear)
@@ -1449,27 +1593,36 @@ static void epd_spectra_mono_display(const uint8_t *mono_bitmap, bool is_clear)
 // 带 mode 的 8bpp 显示：mode 0 = ColorFast(2 相), 1 = ColorQual(3 相)
 void hal_epd_display_8bpp_mode(const unsigned char *index8Data, uint8_t mode)
 {
+    EPD_PROFILE_BEGIN(mode == 0 ? "color_fast" : "color_qual");
     if (index8Data == NULL)
     {
         sys_loge(EPD_TAG, "index8Data is NULL");
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
     if (mode > 1)
     {
         sys_loge(EPD_TAG, "Invalid 8bpp mode: %u (expected 0=ColorFast, 1=ColorQual)", mode);
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
 
     epd_spectra_init();
     epd_spectra_display_color(index8Data, mode);
+    EPD_PROFILE_END();
     sys_logi(EPD_TAG, "Display 8bpp mode=%u completed", mode);
 }
 
 void hal_epd_display_mono(const unsigned char *mono_bitmap)
 {
+    EPD_PROFILE_BEGIN("mono");
     if (mono_bitmap == NULL)
     {
         sys_loge(EPD_TAG, "mono_bitmap is NULL");
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
 
@@ -1481,6 +1634,7 @@ void hal_epd_display_mono(const unsigned char *mono_bitmap)
     }
 
     epd_spectra_mono_display(mono_bitmap, false);
+    EPD_PROFILE_END();
     sys_logd(EPD_TAG, "Display mono (B/W fast refresh) completed");
 }
 

@@ -547,22 +547,22 @@ int main(void) {
 
 ## 10. v2 格式规范
 
-v2 复用 32 字节文件头，通过 `Format`（偏移 0x09）区分编码方式。设计目标是把固件中已实现的三种 spectra 显示能力（`hal_epd_display_mono` / `hal_epd_display_pic48`）封装为可直接存储、传输的 `.film` 文件。
+v2 复用 32 字节文件头，通过 `Format`（偏移 0x09）区分编码方式。设计目标是把固件中已实现的三种 spectra 显示能力（`hal_epd_display_mono` / `hal_epd_display_8bpp_mode`）封装为可直接存储、传输的 `.film` 文件。
 
 ### 10.1 格式总览
 
 | Format | 名称 | 每像素位数 | 单帧主体大小 | 刷新相数 | 颜色来源 |
 | --- | --- | ---: | ---: | ---: | --- |
 | `0x01` | MonoFast | 1 bit | W×H/8 | 1（差分） | 黑白 |
-| `0x02` | ColorQual | 8 bit | W×H | 3 | 固件内置 `rgb_qual` 色板 |
-| `0x03` | ColorFast | 8 bit | W×H | 2 | 固件内置 `rgb_fast` 色板 |
+| `0x02` | ColorQual | 8 bit | W×H | 3 | 客户端 ColorQual 预览／测量色板，固件三相波形 |
+| `0x03` | ColorFast | 8 bit | W×H | 2 | 客户端 ColorFast 预览色板，固件两相波形 |
 
 三种 v2 格式均面向 E6 3.70"（720×480，JD7601）48 色 spectra 面板。像素排列与 v1 一致：从左到右、从上到下；多字节整数均小端序。
 
 ### 10.2 与 v1 的差异
 
 - v2 主体不再是 4bpp 颜色编码，而是直接对应驱动输入缓冲（1bpp 位图或 8bpp 索引）。
-- v2 的 `ColorTable`（偏移 0x10）不使用，填充 `0x00`；颜色映射由固件内置色板决定。
+- v2 的 `ColorTable`（偏移 0x10）不使用，填充 `0x00`。物理结果由驱动波形决定；客户端 RGB 表用于预览与选色，不是文件内携带的颜色定义。
 - v2 的 `ColorCount`（偏移 0x08）不使用，可填 `0x00`。
 - `FrameCount`（偏移 0x0A）用于多帧动画，`0` 或 `1` 表示单帧。
 
@@ -587,7 +587,7 @@ v2 复用 32 字节文件头，通过 `Format`（偏移 0x09）区分编码方�
 
 ColorQual 高质量格式，1 个像素占 1 字节的 8bpp 物理颜色索引。客户端可采用不同测量色板进行选色；[Film 实测校色](measured-color.md) 复用本格式，不新增固件波形。
 
-- **索引范围**：有效索引为 `0`-`63`；索引 `64`-`255` 为固件色板零初始化尾部（`#000000`），不应作为颜色使用。
+- **索引范围**：只输出 `0`-`63`；RGB参考表零初始化尾部不代表 `64`-`255` 的面板物理结果，不得使用这些索引。
 - **色板**：客户端使用 ColorQual 的测量 RGB 表选择物理索引，候选分布不连续（参考表见 10.6）。当前 Web/Flutter 的 ColorQual 候选列表有 52 个索引；显示名称中的颜色数量不等于候选索引数。不要把占位索引 `0`-`2` 当作白底；当前 ColorQual 候选中的白色使用索引 `15`。文件不携带 RGB 色板。
 - **主体大小**：`W×H` 字节，每字节对应一个像素。
 - **刷新**：ColorQual 采用 3 相刷新（qual_phase1 → qual_phase2 → qual_phase3）。
@@ -605,14 +605,14 @@ low  = ((index0 & 7) << 4) | (index1 & 7);
 
 48 色快刷格式，编码方式与 ColorQual 相同，差异在于色板与刷新相数。
 
-- **索引范围**：有效索引 `0`-`63`，`64`-`255` 为黑色占位。
-- **色板**：使用固件内置 `rgb_fast` 色板。有效候选色 55 项，索引分布不连续（完整对照见 10.6）；索引 `0`-`2` 均为白色 `#FFFFFF`，用作背景/白底但不计入候选色数。
+- **索引范围**：只输出 `0`-`63`；不得输出 `64`-`255`。
+- **色板**：客户端按 ColorFast RGB 表选择物理索引，当前候选列表以 `tools/ForFilm/js/convert.js` 为准。不要将占位索引 `0`-`2` 当作白底；同屏色卡使用索引 `21` 作为 ColorFast 白底。
 - **主体大小**：`W×H` 字节。
 - **刷新**：ColorFast 采用 2 相刷新（fast_color_phase1 → fast_color_phase2），速度更快但色准略低于 ColorQual。
 
 ### 10.6 色板参考
 
-48 色 spectra 采用 8bpp 索引，实际 RGB 由固件内置色板决定。下表为 256 项色板中索引 `0`-`63` 的完整对照（字节序 **R, G, B**，8bit/通道）；索引 `64`-`255` 全为 `#000000`（零初始化尾部，非有效色）。
+48 色 spectra 采用8bpp物理索引。下表保留历史RGB参考值，不作为当前客户端候选列表或本块屏幕的实测报告；当前数据以 `tools/ForFilm/js/convert.js` 及其Flutter同步数据为准。编码数、候选数、不同RGB数和实屏可分辨色数应分别记录；`64`-`255` 不属于本格式使用范围。
 
 | 色板 | 有效候选色数 |
 | --- | ---: |
@@ -808,11 +808,10 @@ static void film_display_frame(const uint8_t *film, uint8_t format) {
             hal_epd_display_mono(body);         // 1bpp 位图
             break;
         case 0x02:
-            hal_epd_display_pic48(body);        // 8bpp 索引（ColorQual）
+            hal_epd_display_8bpp_mode(body, 1); // ColorQual 三相
             break;
         case 0x03:
-            /* ColorFast：固件当前接口默认 ColorQual，
-               需要时扩展一个 fast 参数或专用接口 */
+            hal_epd_display_8bpp_mode(body, 0); // ColorFast 两相
             break;
         default:
             break;
@@ -820,6 +819,6 @@ static void film_display_frame(const uint8_t *film, uint8_t format) {
 }
 ```
 
-> 注：ColorFast（`0x03`）的显示入口当前固件尚未单独暴露（`hal_epd_display_pic48` 固定走 ColorQual），实现 `0x03` 时需为 `epd_spectra_display_color` 增加 `mode=0` 的公开接口。
+> Ark 当前已实现 ColorQual/ColorFast，由 Format 分派到 `hal_epd_display_8bpp_mode(body, 1/0)`；多帧动画也复用这些入口。测量说明见 [EPD037A02](epd037a02.md)。
 
 
