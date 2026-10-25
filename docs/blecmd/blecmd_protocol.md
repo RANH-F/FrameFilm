@@ -309,7 +309,7 @@
 
 | 通道 | 名称 | 请求 | 响应 |
 |---|---|---|---|
-| 0x59 | CAPABILITIES_GET | 空 | 版本 1(u8) + flags(u32 BE)，bit0=彩色通行证、bit1=通用 WiFi 文件上传 |
+| 0x59 | CAPABILITIES_GET | 空 | 版本 1(u8) + flags(u32 BE)，bit0=彩色通行证、bit1=通用 WiFi 文件上传、bit2=只读 SD 目录与统计 |
 
 ### 3.16 Ark 通用 WiFi 文件上传（0x5A）
 
@@ -1477,7 +1477,7 @@ SUM  = (0x55 + 0x4E + 0x01 + 0x02) & 0xFF = 0xA6
 
 ### 4.15 Ark 能力查询（0x59）与彩色通行证
 
-仅 `frame_film_ark` 实现 `CAPABILITIES_GET`：请求 LEN=0，回包 LEN=5，`capVersion=1(u8)` 后接 `flags(u32 BE)`。bit0 (`0x00000001`) 表示支持通行证彩色 `profile.bin`；bit1 (`0x00000002`) 表示支持 0x5A 通用 WiFi 文件上传，当前 flags=`0x00000003`；其余位保留且为零。旧固件不响应此命令，客户端应提示升级固件或选择黑白模式，不发送彩色资料，不能凭用户可见版本号判断能力。
+仅 `frame_film_ark` 实现 `CAPABILITIES_GET`：请求 LEN=0，回包 LEN=5，`capVersion=1(u8)` 后接 `flags(u32 BE)`。bit0 (`0x00000001`) 表示支持通行证彩色 `profile.bin`；bit1 (`0x00000002`) 表示支持 0x5A 通用 WiFi 文件上传，bit2 (`0x00000004`) 表示支持只读 SD 目录与统计 0x5B，当前 flags=`0x00000007`；其余位保留且为零。旧固件不响应此命令，客户端应提示升级固件或选择黑白模式，不发送彩色资料，不能凭用户可见版本号判断能力。
 
 通行证卡片文件仍放在 `/sdcard/app/pass/profile.bin`，文件头 16B：`FFUI`(4B)、version(1B)、format(1B)、width=440(u16 LE)、height=608(u16 LE)、保留零(6B)。原 v1/format1 的正文为 33440B、每字节 MSB 起 8 个黑白像素（1=黑）；新 v2/format2 的正文为 133760B、每字节高 nibble 为左像素，色码为黑0、白1、黄2、红3、蓝5、绿6。整文件分别为 33456B 和 133776B。彩色卡仅在 Ark UI 通行证页合成到黑白外壳，整屏走 EPD 4bpp 彩色刷新；退出页面回到原黑白 UI 路径。
 
@@ -1486,6 +1486,18 @@ SUM  = (0x55 + 0x4E + 0x01 + 0x02) & 0xFF = 0xA6
 `WIFI_DIRECT_FILE_START` 使用 0x50 相同的临时 WiFi 网络、HTTP 下载与状态机，请求为四个 NUL 结尾的 ASCII 字段 `SSID\0PASSWORD\0URL\0相对目标路径\0`，不含额外字节。SSID、密码、HTTP URL 和 192B DATA 上限沿用 0x50；目标路径相对 `/sdcard`，不得以 `/` 开头、包含反斜杠或 `..`，且不能超过文件保存接口的路径长度。示例：`app/pass/profile.bin`、`app/pass/profile.json`。响应 0/1/2/3 与 0x50 一致。客户端应先查 0x59 的 bit1，再发送 0x5A。
 
 HTTP 响应需为 200 且有非零 Content-Length；文件可为任意非空二进制或文本，不要求 32B film 头或 `.film` 后缀。显式目标以暂存文件写入，只有完整下载、长度检查和提交都成功后，0x51 才能最终报 DONE；保存失败报 ERROR/error=3，取消时撤销未提交暂存。目标若为 `.film`，仍按现有显式路径规则验证 film 内容。上传不自动切换或刷新 app 页面，也不触发图片列表事件。已提交文件不会因网络恢复失败或迟到取消而删除；0x51 的 DONE 还要求恢复原 WiFi 状态。0x51 状态查询和 0x52 取消的格式、终态与 0x50/0x57 共用。直传忙时另一个 0x5A 返回 1。
+
+### 4.17 Ark 只读 SD 目录与统计（0x5B）
+
+仅 Ark；客户端先查询 0x59 bit2。旧固件无此能力时提示升级，不得使用 0x4B 切 app 模拟目录浏览。
+
+0x5B 请求 op=0（1B）查询统计；响应 26B：status(u8)、valid(u8)、totalBytes(u64 BE)、freeBytes(u64 BE)、filmCount(u32 BE)、animationCount(u32 BE)。status=0 表示已挂载，1=未挂载；valid bit0=容量有效、bit1=图片数有效、bit2=动画数有效。无效字段必须显示未读取，不可显示为0。容量为 FAT 文件系统总/剩余容量，不包含文件系统以外的保留空间。
+
+请求 op=1（图片）或2（动画）+index(u32 BE)，响应 status(u8)+total(u32 BE)+name(UTF-8,NUL，仅成功时存在)。status=0=单条成功，1=SD未挂载，2=读取失败，3=参数无效，4=目录结束（index=total，包括空目录），5=文件名超过186 UTF-8字节（不截断）。每页一条，按目录扫描顺序；total变化则客户端丢弃未完成列表并提示刷新。读取到结束包后列表才完整。目录在读取间可以变化，因此结果是浏览快照，索引不是可直接用于0x05/0x07的播放文件ID。
+
+两个只读操作均独立扫描固定 `/sdcard/film` 或 `/sdcard/animation`；只统计常规 `.film` 文件且大小至少32字节，与播放列表规则一致。不存在的目录视为空且不创建目录，不清理临时文件，不修改活跃目录、播放缓冲或文件列表，不发布文件事件，也不切 app 或刷新画面。读取失败可得到部分有效统计。
+
+客户端显式“显示”时才允许切到目标app，随后读取活跃列表并按文件名映射实际ID。删除仅在对应app已活跃时可用：先回读app、重读活跃列表、按文件名映射ID，再发0x05；禁止把浏览索引直接当作ID，也禁止为了删除隐式切app。删除确认后沿用既有删除、列表刷新与播放缓冲失效语义。
 
 ## 5. 校验和计算
 

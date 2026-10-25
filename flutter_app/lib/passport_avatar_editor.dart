@@ -6,7 +6,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 
-import 'frame_algorithms.dart';
+import 'frame_codec.dart';
+import 'frame_algorithms.dart' show quantizeFramePixels;
+import 'live_image_composition.dart';
 
 const avatarAlgorithms = {
   'adaptive': '自适应（与 Film 相同）',
@@ -150,19 +152,27 @@ Future<({String crop, String processed})> renderAvatarEdit(
       .buffer
       .asUint8List();
   crop.dispose();
-  for (var i = 0; i < rgba.length; i += 4) {
-    for (var k = 0; k < 3; k++) {
-      rgba[i + k] = (rgba[i + k] + (o['brightness'] as num) * 255)
-          .clamp(0, 255)
-          .round();
-    }
-  }
-  adjustFrameColors(
+  adjustFrameRgba(
     rgba,
-    contrast: (o['contrast'] as num).toDouble(),
-    saturation: mode == 'color' ? (o['saturation'] as num).toDouble() : 0,
+    FrameOptions(
+      brightness: (o['brightness'] as num).toDouble(),
+      contrast: (o['contrast'] as num).toDouble(),
+      saturation: mode == 'color' ? (o['saturation'] as num).toDouble() : 0,
+    ),
   );
-  if (o['dither'] == true || mode == 'color') {
+  if (mode == 'mono') {
+    await quantizeFrameMono(
+      rgba,
+      o['dither'] as bool,
+      () {
+        checkCancelled?.call();
+        return false;
+      },
+      null,
+      width: 128,
+      height: 160,
+    );
+  } else if (mode == 'color' || o['dither'] == true) {
     await quantizeFramePixels(
       rgba,
       128,
@@ -173,12 +183,7 @@ Future<({String crop, String processed})> renderAvatarEdit(
       checkCancelled: checkCancelled,
     );
   } else {
-    for (var i = 0; i < rgba.length; i += 4) {
-      final v = .299 * rgba[i] + .587 * rgba[i + 1] + .114 * rgba[i + 2] < 160
-          ? 0
-          : 255;
-      rgba[i] = rgba[i + 1] = rgba[i + 2] = v;
-    }
+    await quantizeFrameMono(rgba, false, null, null, width: 128, height: 160);
   }
   final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
   final d = ui.ImageDescriptor.raw(
@@ -215,7 +220,10 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
   late Map<String, dynamic> options = {...widget.edit.options};
   String? crop, processed, error;
   int generation = 0;
-  bool pending = true;
+  bool pending = true, rendering = false;
+  late final Uint8List sourceBytes = base64Decode(
+    widget.edit.source.substring(22),
+  );
   @override
   void initState() {
     super.initState();
@@ -230,18 +238,22 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
 
   Future<void> update() async {
     final g = ++generation;
+    if (rendering) {
+      setState(() => pending = true);
+      return;
+    }
+    rendering = true;
+    final snapshot = {...options};
     setState(() {
       pending = true;
       error = null;
     });
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    if (!mounted || g != generation) return;
     try {
       final result = await renderAvatarEdit(
-        PassportAvatarEdit(widget.edit.source, {...options}),
+        PassportAvatarEdit(widget.edit.source, snapshot),
         widget.mode,
         checkCancelled: () {
-          if (!mounted || g != generation) {
+          if (!mounted) {
             throw StateError('头像预览已取消');
           }
         },
@@ -258,6 +270,9 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
           error = '$e';
           pending = false;
         });
+    } finally {
+      rendering = false;
+      if (mounted && g != generation) update();
     }
   }
 
@@ -312,12 +327,23 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
                   child: SizedBox(
                     width: 128,
                     height: 160,
-                    child: crop == null
-                        ? const ColoredBox(color: Colors.white)
-                        : Image.memory(
-                            base64Decode(crop!.substring(22)),
-                            gaplessPlayback: true,
-                          ),
+                    child: LiveImageComposition(
+                      key: const ValueKey('avatar-live-composition'),
+                      source: sourceBytes,
+                      width: 128,
+                      height: 160,
+                      options: FrameOptions(
+                        quarterTurns: (options['turns'] as num).toInt(),
+                        zoom: (options['zoom'] as num).toDouble(),
+                        panX: (options['x'] as num).toDouble(),
+                        panY: (options['y'] as num).toDouble(),
+                        brightness: (options['brightness'] as num).toDouble(),
+                        contrast: (options['contrast'] as num).toDouble(),
+                        saturation: widget.mode == 'color'
+                            ? (options['saturation'] as num).toDouble()
+                            : 0,
+                      ),
+                    ),
                   ),
                 ),
                 SizedBox(
@@ -364,25 +390,34 @@ class _PassportAvatarDialogState extends State<PassportAvatarDialog> {
               value: options['dither'] as bool,
               onChanged: (v) => change('dither', v),
             ),
-            DropdownButton<String>(
-              value: options['algorithm'] as String,
-              isExpanded: true,
-              items: avatarAlgorithms.entries
-                  .map(
-                    (e) => DropdownMenuItem(value: e.key, child: Text(e.value)),
-                  )
-                  .toList(),
-              onChanged: options['dither'] == true
-                  ? (v) {
-                      if (v != null) change('algorithm', v);
-                    }
-                  : null,
-            ),
-            if (options['dither'] == true)
-              if (options['algorithm'] == 'adaptive')
-                const Text('根据头像细节和色彩自动选择抖动算法与强度。可继续调整构图、亮度和对比度。')
-              else
-                slider('strength', '抖动强度', 0, 3),
+            if (widget.mode == 'mono')
+              const Text(
+                '黑白头像使用 Film MonoFast：开启抖动使用 Floyd-Steinberg，关闭时直接黑白量化。',
+              )
+            else ...[
+              if (widget.mode == 'grayscale')
+                const Text('灰度头像先转为灰阶，再使用所选 Film 算法生成黑白空间半色调。'),
+              DropdownButton<String>(
+                value: options['algorithm'] as String,
+                isExpanded: true,
+                items: avatarAlgorithms.entries
+                    .map(
+                      (e) =>
+                          DropdownMenuItem(value: e.key, child: Text(e.value)),
+                    )
+                    .toList(),
+                onChanged: options['dither'] == true
+                    ? (v) {
+                        if (v != null) change('algorithm', v);
+                      }
+                    : null,
+              ),
+              if (options['dither'] == true)
+                if (options['algorithm'] == 'adaptive')
+                  const Text('根据头像细节和色彩自动选择抖动算法与强度。可继续调整构图、亮度和对比度。')
+                else
+                  slider('strength', '抖动强度', 0, 3),
+            ],
           ],
         ),
       ),

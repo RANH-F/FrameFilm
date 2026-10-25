@@ -41,6 +41,7 @@ class PreviewDeviceGateway implements DeviceGateway {
   Stream<DeviceSnapshot> get snapshots => _events.stream;
 
   int _fileDirectory = 0;
+  int _activeFileDirectory = 0;
   int? _displayedFile;
   final _deviceFiles = <int, List<String>>{
     0: ['演示画面.film', '风景.film'],
@@ -49,7 +50,16 @@ class PreviewDeviceGateway implements DeviceGateway {
   Map<String, Object?> get _fileState => {
     'directory': _fileDirectory == 3 ? 'animation' : 'film',
     'loaded': true,
-    'currentId': _displayedFile,
+    'canDelete': _activeFileDirectory == _fileDirectory,
+    'storage': {
+      'phase': 'ready',
+      'totalBytes': 8 * 1024 * 1024 * 1024,
+      'freeBytes': 6 * 1024 * 1024 * 1024,
+      'filmCount': _deviceFiles[0]!.length,
+      'animationCount': _deviceFiles[3]!.length,
+      'message': warning,
+    },
+    'currentId': _activeFileDirectory == _fileDirectory ? _displayedFile : null,
     'message': warning,
     'entries': [
       for (var i = 0; i < _deviceFiles[_fileDirectory]!.length; i++)
@@ -104,6 +114,7 @@ class PreviewDeviceGateway implements DeviceGateway {
     scenario = value ?? scenario;
     _connected = false;
     _fileDirectory = 0;
+    _activeFileDirectory = 0;
     _displayedFile = null;
     _deviceFiles[0] = ['演示画面.film', '风景.film'];
     _deviceFiles[3] = ['演示动画.film'];
@@ -149,7 +160,9 @@ class PreviewDeviceGateway implements DeviceGateway {
           throw ArgumentError('动画播放参数超出范围');
         }
         _fileDirectory = 3;
+        _activeFileDirectory = 3;
         _settingsMessage = '模拟动画播放设置已保存；未操作真实设备';
+      case 'refreshDeviceStorage':
       case 'listDeviceFiles':
         break;
       case 'setDeviceFileDirectory':
@@ -158,7 +171,7 @@ class PreviewDeviceGateway implements DeviceGateway {
           throw ArgumentError('不支持的目录');
         }
         _fileDirectory = appId;
-        _displayedFile = null;
+        _settingsMessage = '只读浏览模拟目录；未操作真实设备';
       case 'displayDeviceFile':
       case 'deleteDeviceFile':
         final id = arguments!['id'] as int;
@@ -169,9 +182,12 @@ class PreviewDeviceGateway implements DeviceGateway {
           throw StateError('列表已变化，请刷新');
         }
         if (method == 'deleteDeviceFile') {
+          if (_activeFileDirectory != _fileDirectory)
+            throw StateError('请先在设备打开对应 app 后删除');
           entries.removeAt(id);
           _displayedFile = null;
         } else {
+          _activeFileDirectory = _fileDirectory;
           _displayedFile = id;
         }
       case 'readPassport':

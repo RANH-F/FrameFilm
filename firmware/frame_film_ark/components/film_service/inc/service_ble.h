@@ -105,7 +105,8 @@ extern "C"{
 #define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
-#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证、bit1=通用 WiFi 文件
+#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证、bit1=通用 WiFi 文件、bit2=只读目录与统计
+#define BLE_FILM_TRANS_CH_STORAGE_CATALOG (0x5B) // Ark read-only storage/catalog
 #define BLE_FILM_TRANS_CH_DIRECT_FILE_START (0x5A) // SSID\0PASSWORD\0URL\0相对路径\0
 #define BLE_DIRECT_START_DATA_MAX                         (192)
 

@@ -13,17 +13,17 @@ import 'frame_editor.dart';
 import 'animation_workshop.dart';
 import 'device_files.dart';
 import 'forfilm_theme.dart';
+import 'interface_theme_preferences.dart';
 import 'workbench_widgets.dart';
 import 'workbench_page_transition.dart';
 import 'frame_io.dart' as frame_io;
 import 'frame_quick_page.dart';
 import 'frame_media.dart' as frame_media;
 
-enum FilmTheme { automatic, forFilm, arknights }
-
 class FrameFilmApp extends StatefulWidget {
-  const FrameFilmApp({super.key, this.gateway});
+  const FrameFilmApp({super.key, this.gateway, this.themePreferences});
   final DeviceGateway? gateway;
+  final InterfaceThemePreferences? themePreferences;
 
   @override
   State<FrameFilmApp> createState() => _FrameFilmAppState();
@@ -59,11 +59,17 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
     }
   }
 
-  FilmTheme selectedTheme = FilmTheme.automatic;
+  bool arkThemeEnabled = true;
+  bool themePreferenceReady = false;
+  bool themeWelcomed = false;
+  String? themePreferenceMessage;
+  int themePreferenceRevision = 0;
+  Future<void> themeSave = Future<void>.value();
+  late final InterfaceThemePreferences themePreferences =
+      widget.themePreferences ?? const LocalInterfaceThemePreferences();
   int page = 0;
   final scrollControllers = List.generate(6, (_) => ScrollController());
   bool loading = false;
-  bool wasConnected = false;
   Timer? loadingTimer;
   final passportEditor = PassportEditorController();
   final frameEditor = FrameEditorController();
@@ -85,9 +91,66 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
     ('设置', Icons.tune_rounded),
   ];
 
-  bool get ark =>
-      selectedTheme == FilmTheme.arknights ||
-      (selectedTheme == FilmTheme.automatic && device.snapshot.connected);
+  bool get arkConnected =>
+      device.snapshot.connected &&
+      (device.snapshot.name?.toUpperCase().startsWith('FRAMEFILMARK') ?? false);
+  bool get ark => themePreferenceReady && arkThemeEnabled && arkConnected;
+
+  Future<void> loadThemePreference() async {
+    final revision = themePreferenceRevision;
+    bool enabled = true;
+    try {
+      enabled = await themePreferences.load();
+    } catch (_) {
+      // Match the web: unavailable preferences do not prevent session use.
+    }
+    if (!mounted || revision != themePreferenceRevision) return;
+    setState(() {
+      arkThemeEnabled = enabled;
+      themePreferenceReady = true;
+      syncThemePresentation();
+    });
+  }
+
+  void syncThemePresentation() {
+    if (!device.snapshot.connected) themeWelcomed = false;
+    if (!ark) {
+      loadingTimer?.cancel();
+      loading = false;
+    } else if (!themeWelcomed) {
+      themeWelcomed = true;
+      showThemeIntro();
+    }
+  }
+
+  void showThemeIntro() {
+    if (!ark) return;
+    loading = true;
+    loadingTimer?.cancel();
+    loadingTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => loading = false);
+    });
+  }
+
+  void changeThemePreference(bool enabled) {
+    final revision = ++themePreferenceRevision;
+    setState(() {
+      arkThemeEnabled = enabled;
+      themePreferenceReady = true;
+      themePreferenceMessage = null;
+      syncThemePresentation();
+    });
+    // Serialize saves so rapid toggles persist the user's last choice.
+    themeSave = themeSave.then((_) async {
+      try {
+        await themePreferences.save(enabled);
+      } catch (_) {
+        if (mounted && revision == themePreferenceRevision) {
+          setState(() => themePreferenceMessage = '本次切换已生效，偏好未能保存。');
+        }
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -99,6 +162,7 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       preview: device.gateway is PreviewDeviceGateway,
     );
     device.addListener(onDeviceChanged);
+    unawaited(loadThemePreference());
   }
 
   void onQuickChanged() {
@@ -134,17 +198,7 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       }
     }
     settingsSnapshot = snapshot;
-    if (connected && !wasConnected && ark) {
-      loading = true;
-      loadingTimer?.cancel();
-      loadingTimer = Timer(const Duration(milliseconds: 1600), () {
-        if (mounted) setState(() => loading = false);
-      });
-    } else if (!connected) {
-      loadingTimer?.cancel();
-      loading = false;
-    }
-    wasConnected = connected;
+    syncThemePresentation();
     if (mounted) setState(() {});
   }
 
@@ -617,6 +671,23 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       ),
       const SizedBox(height: 20),
       connectionInfoPanel(context),
+      if (snapshot.connected) ...[
+        const SizedBox(height: 20),
+        DeviceStorageSummary(
+          controller: device,
+          onBrowseDirectory: (directory) {
+            navigate(5);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && page == 5 && scrollControllers[5].hasClients) {
+                scrollControllers[5].jumpTo(0);
+              }
+            });
+            unawaited(
+              device.command('setDeviceFileDirectory', {'appId': directory}),
+            );
+          },
+        ),
+      ],
     ];
   }
 
@@ -1285,19 +1356,31 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       children: [
         Text('界面主题', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
-        const Text('自动模式在连接 Ark 后启用明日方舟主题；断连回到 ForFilm。选择仅在本次应用会话内生效。'),
-        const SizedBox(height: 20),
-        SegmentedButton<FilmTheme>(
-          showSelectedIcon: false,
-          segments: const [
-            ButtonSegment(value: FilmTheme.automatic, label: Text('自动')),
-            ButtonSegment(value: FilmTheme.forFilm, label: Text('ForFilm')),
-            ButtonSegment(value: FilmTheme.arknights, label: Text('明日方舟')),
-          ],
-          selected: {selectedTheme},
-          onSelectionChanged: (value) =>
-              setState(() => selectedTheme = value.first),
+        SwitchListTile.adaptive(
+          key: const Key('ark-theme-switch'),
+          contentPadding: EdgeInsets.zero,
+          title: const Text('明日方舟主题'),
+          subtitle: Text(
+            arkThemeEnabled
+                ? '连接 FRAMEFILMARK 成功后自动使用明日方舟主题。'
+                : '已关闭：使用默认 ForFilm 主题。',
+          ),
+          value: arkThemeEnabled,
+          onChanged: changeThemePreference,
         ),
+        const Text('偏好保存在本机；断开连接时恢复 ForFilm，重连 Ark 后按此开关启用。'),
+        if (themePreferenceMessage != null) ...[
+          const SizedBox(height: 8),
+          Text(themePreferenceMessage!),
+        ],
+        if (ark) ...[
+          const SizedBox(height: 12),
+          OutlinedButton(
+            key: const Key('replay-ark-intro'),
+            onPressed: () => setState(showThemeIntro),
+            child: const Text('重看启动界面'),
+          ),
+        ],
       ],
     ),
   );
@@ -1340,8 +1423,26 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
     const AboutPanel(),
   ];
 
-  Widget connectionTransition() => PrtsConnectionIntro(
+  Widget connectionTransition() => Stack(
     key: const Key('connection-transition'),
-    deviceName: device.snapshot.name ?? 'FrameFilm Ark',
+    children: [
+      Positioned.fill(
+        child: PrtsConnectionIntro(
+          deviceName: device.snapshot.name ?? 'FrameFilm Ark',
+        ),
+      ),
+      Positioned(
+        right: 16,
+        top: 16,
+        child: TextButton(
+          key: const Key('skip-ark-intro'),
+          onPressed: () {
+            loadingTimer?.cancel();
+            setState(() => loading = false);
+          },
+          child: const Text('跳过'),
+        ),
+      ),
+    ],
   );
 }

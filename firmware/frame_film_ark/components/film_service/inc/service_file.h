@@ -2,6 +2,10 @@
 #define __SERVICE_FILE_H__
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+
 
 /*********************************************************************
  * INCLUDES
@@ -98,6 +102,9 @@ typedef enum {
  * 初始化状态变量，检查SD卡状态。
  */
 extern void service_file_init(void);
+
+/** Independent read-only scan: directory 1=film, 2=animation. */
+extern int service_file_catalog(uint8_t directory, uint32_t index, uint32_t *count, char *name, size_t name_size);
 
 /**
  * @brief 设置当前文件目录

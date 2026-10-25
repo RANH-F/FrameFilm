@@ -61,7 +61,7 @@
 /*********************************************************************
  * MACROS
  */
-#define BLE_RESP_DATA_MAX          (137)  /* PROFILE_READ: 9B 元数据 + 最多 128B 数据 */
+#define BLE_RESP_DATA_MAX          (192)  /* Includes read-only catalog filename responses. */
 #define BLE_PROFILE_PATH           "/sdcard/app/pass/profile.json"
 #define BLE_PROFILE_FILE_MAX       (350000L)
 #define BLE_PROFILE_CHUNK_MAX      (128u)
@@ -750,8 +750,51 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CAPABILITIES_GET:
         {
             if(cmd->len != 0) break;
-            const uint8_t capabilities[5] = {1, 0, 0, 0, 3};
+            const uint8_t capabilities[5] = {1, 0, 0, 0, 7};
             service_ble_send_resp(cmd->ch, capabilities, sizeof(capabilities));
+            break;
+        }
+        case BLE_FILM_TRANS_CH_STORAGE_CATALOG:
+        {
+            uint8_t response[192] = {3};
+            uint8_t length = 1;
+            if(cmd->len == 1 && cmd->pdata[0] == 0)
+            {
+                uint64_t total = 0, free_bytes = 0;
+                uint32_t films = 0, animations = 0;
+                response[0] = hal_sd_get_status() == SD_MOUNT ? 0 : 1;
+                response[1] = 0;
+                if(response[0] == 0)
+                {
+                    if(hal_sd_get_space(&total, &free_bytes) == 0) response[1] |= 1;
+                    if(service_file_catalog(1, 0, &films, NULL, 0) == 0) response[1] |= 2;
+                    if(service_file_catalog(2, 0, &animations, NULL, 0) == 0) response[1] |= 4;
+                }
+                for(unsigned i = 0; i < 8; ++i) {
+                    response[2+i] = (uint8_t)(total >> (56-i*8));
+                    response[10+i] = (uint8_t)(free_bytes >> (56-i*8));
+                }
+                for(unsigned i = 0; i < 4; ++i) {
+                    response[18+i] = (uint8_t)(films >> (24-i*8));
+                    response[22+i] = (uint8_t)(animations >> (24-i*8));
+                }
+                length = 26;
+            }
+            else if(cmd->len == 5 && (cmd->pdata[0] == 1 || cmd->pdata[0] == 2))
+            {
+                uint32_t index = ((uint32_t)cmd->pdata[1]<<24) | ((uint32_t)cmd->pdata[2]<<16) |
+                                 ((uint32_t)cmd->pdata[3]<<8) | cmd->pdata[4];
+                uint32_t count = 0;
+                char name[187] = {0};
+                response[0] = service_file_catalog(cmd->pdata[0], index, &count, name, sizeof(name));
+                for(unsigned i = 0; i < 4; ++i) response[1+i] = (uint8_t)(count >> (24-i*8));
+                length = 5;
+                if(response[0] == 0) {
+                    if(index >= count) response[0] = 4;
+                    else { memcpy(response+5, name, strlen(name)+1); length += strlen(name)+1; }
+                }
+            }
+            service_ble_send_resp(cmd->ch, response, length);
             break;
         }
         case BLE_FILM_TRANS_CH_BUILD_INFO_GET:

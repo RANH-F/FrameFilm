@@ -1456,3 +1456,39 @@ int service_file_delete(uint32_t file_id)
         return -1;
     }
 }
+
+/* No set_dir/refresh/clean or playback state mutation; missing directory is empty. */
+int service_file_catalog(uint8_t directory, uint32_t index, uint32_t *count,
+                         char *name, size_t name_size)
+{
+    const char *path = directory == 1 ? FILM_DIR : directory == 2 ? ANIM_DIR : NULL;
+    if(!path || !count || (name && name_size == 0)) return 3;
+    *count = 0;
+    if(name) name[0] = '\0';
+    if(hal_sd_get_status() != SD_MOUNT) return 1;
+    DIR *dir = opendir(path);
+    if(!dir) return errno == ENOENT ? 0 : 2;
+    struct dirent *entry;
+    int result = 0;
+    errno = 0;
+    while((entry = readdir(dir)) != NULL)
+    {
+        char *ext = strrchr(entry->d_name, '.');
+        if(!ext || strcmp(ext, FILM_FILE_EXT)) continue;
+        char full[512];
+        struct stat st;
+        if(snprintf(full, sizeof(full), "%s/%s", path, entry->d_name) >= sizeof(full) ||
+           stat(full, &st) != 0) { result = 2; break; }
+        if(!S_ISREG(st.st_mode) || st.st_size < FILM_HEADER_SIZE) continue;
+        if(name && *count == index)
+        {
+            if(strlen(entry->d_name) >= name_size) { result = 5; break; }
+            strcpy(name, entry->d_name);
+        }
+        ++*count;
+        errno = 0;
+    }
+    if(errno != 0) result = 2;
+    closedir(dir);
+    return result;
+}

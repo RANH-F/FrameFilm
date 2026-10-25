@@ -21,6 +21,7 @@ const deviceSettingsMethods = {
   'refresh',
   'playAnimation',
   'listDeviceFiles',
+  'refreshDeviceStorage',
   'displayDeviceFile',
   'deleteDeviceFile',
   'setDeviceFileDirectory',
@@ -395,6 +396,7 @@ class DeviceController extends ChangeNotifier {
         (value) {
           if (_disposed) return;
           final wasConnected = snapshot.connected;
+          final wasTransferring = snapshot.transfer.active;
           snapshot = value.retainingTransfer(snapshot);
           if (snapshot.connected != wasConnected) {
             _connectionSession++;
@@ -402,6 +404,12 @@ class DeviceController extends ChangeNotifier {
             automaticFilesLoading = false;
             automaticFilesFailed = false;
             _automaticFilesInitialized = false;
+          }
+          if (wasTransferring &&
+              !snapshot.transfer.active &&
+              snapshot.transfer.success &&
+              snapshot.connected) {
+            automaticFilesPending = true;
           }
           // Android announces the connection before starting its settings read.
           // Wait for that initialization, or an already initialized snapshot.
