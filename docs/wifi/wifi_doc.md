@@ -4,7 +4,7 @@
 
 FrameFilm Pro 版本在基础版的 BLE 通信之外，新增了 WiFi 联网功能。通过 WiFi 连接，设备可以直接从网络下载 film 文件，实现**远程推送显示**和**WiFi 轮播模式**。
 
-> **注意**：WiFi 功能仅在 FrameFilm Pro 版本上可用。
+> 以下配网与轮播章节描述经典 Pro 固件；Ark App 的 WiFi Direct 直传见文末专节。
 
 ## 2. 功能架构
 
@@ -234,3 +234,25 @@ app.sendBleCmd(0x38, null);        // 连接
 | 版本 | 日期 | 描述 |
 |------|------|------|
 | 1.0 | 2026-07-22 | 初始版本，基于 service_wifi.c v0.1 |
+
+## Ark App HTTP 直传流水线（2026-10-27）
+
+本节适用于 `frame_film_ark` 的 App WiFi Direct 文件直传。Android 创建组并提供 HTTP 文件服务，Ark 作为 STA 用一次 GET 接收完整文件；不依赖外部路由器。前面的 Pro 配网/轮播说明不描述此路径。
+
+参考 [Espressif Wireless Disk](https://github.com/espressif/esp-iot-solution/tree/master/examples/usb/device/usb_msc_wireless_disk) 的网络接收与落盘分离方式实现；没有照搬其大内存配置，也没有更换传输协议。
+
+- 接收端一次申请3×16 KiB PSRAM缓冲池，聚合短HTTP read，按完整块或文件末尾短块交给既有file_task。
+- 复用原4 KiB内部DMA中转及扇区对齐写入，不增加任务栈，不增加内部DMA缓冲。
+- 异步保存接口借用缓冲，file_task完成后回调归还；入队失败没有回调，缓冲仍归调用者。同步BLE上传仍接管并释放消息缓冲。
+- 进度按已写入成功的块累计，不能将仅进入队列的字节算作保存完成。最终仍检查长度、关闭文件、验证与提交结果。
+- HTTP截断、短写、取消或资源不足不会提交正式文件；先收回全部在途缓冲，再撤销暂存文件和释放缓冲池。已有owner互斥、目标旧文件保护与文件任务单写者规则保留。
+- BLE进度/取消通道和断连取消语义保留，传输期间仍使用WIFI_PS_NONE。本次未修改TCP窗口、BLE共存配置、显示版本3.2.5。
+- Film、动画及显式路径文件（包括通行证资料）使用此路径；OTA的Flash写入及旧film_api_url轮播下载路径不在本次变更范围内。
+
+### 诊断与验证
+
+结束时输出一次 `HTTP pipeline`：net/saved字节、reads/blocks计数、read_us、queue_wait_us、write_us、elapsed_us；提交阶段另输出 `HTTP final commit_us` 与result。阶段时间会重叠，不能相加当总耗时。queue_wait_us包括提交文件消息及等待完成缓冲的时间；write_us来自文件任务的数据处理分支，包含检查和实际写入。elapsed_us涵盖缓冲准备、接收与排空，不含HTTP建连或最终提交。
+
+[聚焦宿主检查](../../tools/wifi-transfer-tests/README.md)编译真实C接收函数及文件任务分支，覆盖短read、尾块顺序、缓冲生命周期、取消、写失败、截断、入队/分配失败与同步BLE释放行为；依赖由stub提供，不能代替ESP-IDF并发及SDMMC实测。
+
+本机ESP-IDF 5.5.2构建通过，版本3.2.5，诊断镜像1939280B，仍适配现有1945600B应用分区。此前47,347,232B文件用时695.130秒、约68.1kB/s是旧实现实测；本次尚未取得设备吞吐对比，不能宣称已提速。下一轮应在同手机、同文件和同SD卡条件下比较保存完成耗时与上述阶段日志。

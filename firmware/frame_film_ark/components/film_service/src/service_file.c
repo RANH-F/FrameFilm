@@ -47,6 +47,7 @@
 #include "sys_event.h"
 #include "hal_api.h"
 #include "service_file.h"
+#include "esp_timer.h"
 
 /*********************************************************************
  * MACROS
@@ -435,7 +436,9 @@ save_start_done:
                 xSemaphoreGive(m_save_done);
                 break;
             case MSG_FILE_SAVE_DATA:
-                m_save_result = -1;
+            {
+                int result = -1;
+                int64_t write_start = esp_timer_get_time();
                 if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle &&
                    !m_file_state.save_failed && msg.pdata &&
                    msg.data_len <= m_file_state.save_file_size - m_file_state.save_written)
@@ -452,19 +455,21 @@ save_start_done:
                     size_t written = file_save_write_dma(m_file_state.save_file_handle, msg.pdata,
                                                          msg.data_len, m_file_state.save_written);
                     m_file_state.save_written += written;
-                    if(written == msg.data_len) m_save_result = 0;
+                    if(written == msg.data_len) result = 0;
                     else m_file_state.save_failed = 1;
                 }
                 else if(m_file_state.save_owner == msg.owner)
                 {
                     m_file_state.save_failed = 1;
                 }
-                if(msg.pdata)
+                if(msg.pdata && !msg.done)
                 {
                     free(msg.pdata);
                 }
-                xSemaphoreGive(m_save_done);
+                if(msg.done) msg.done(msg.context, result, esp_timer_get_time() - write_start);
+                else { m_save_result = result; xSemaphoreGive(m_save_done); }
                 break;
+            }
             case MSG_FILE_SAVE_STOP:
                 m_save_result = -1;
                 if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle)
@@ -1335,6 +1340,16 @@ int service_file_save_data(file_save_owner_t owner, uint8_t *pdata, uint32_t dat
     }
     file_msg_t msg = {.ID = MSG_FILE_SAVE_DATA, .owner = owner, .pdata = pdata, .data_len = data_len};
     return file_save_call(&msg); // 入队成功后 file_task 接管 pdata，包括失败路径
+}
+
+int service_file_save_data_async(file_save_owner_t owner, uint8_t *pdata,
+                                 uint32_t data_len, void (*done)(void *, int, int64_t), void *context)
+{
+    if((owner != FILE_SAVE_BLE && owner != FILE_SAVE_WIFI) || !pdata || !data_len ||
+       !done || !m_file_msg_hdl) return -1;
+    file_msg_t msg = {.ID = MSG_FILE_SAVE_DATA, .owner = owner, .pdata = pdata,
+                     .data_len = data_len, .done = done, .context = context};
+    return xQueueSend(m_file_msg_hdl, &msg, pdMS_TO_TICKS(100)) == pdPASS ? 0 : -1;
 }
 
 int service_file_save_start(file_save_owner_t owner, const char *pfilename, uint32_t file_size)
