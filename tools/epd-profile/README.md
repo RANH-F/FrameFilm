@@ -54,13 +54,14 @@ Windows + clang 的 `test_mono_profile.py` 检查真实 C 聚合器及会话生�
 
 ## BUSY 与 REF 的本屏对应采样
 
-PROFILE 构建还会在少量稳态帧中对 GPIO11 的 BUSY 双边沿做软件时间戳采样，保持原命令、等待、尾延时及电源顺序。跳过首个已统计稳态帧，保留随后四帧及下一帧 begin，最多 80 条记录。IRQ 不输出日志；采集完即移除本引脚 handler，退出会话时输出一条 `EPD_BUSY_TRACE`。不卸载共享 GPIO ISR service，正常构建不增加 IRQ 或 trace 存储。
+PROFILE 构建对 GPIO11 的 BUSY 双边沿打时间戳，原命令、等待、尾延时与电源顺序不变。early 保留最初四个被采样的稳态调用及下一次 begin，最多80条；之后 IRQ 继续向固定 ring 采集最近四个完整调用，另留一个在途 slot，每 slot 最多20条。结束会话先 STOP 采集并移除本 pin handler，再执行原 POF，最后集中输出；不把关电边沿混入 REF。共享 GPIO ISR service 不卸载，正常固件无额外 IRQ 或 trace 存储。
 
 ```powershell
 python tools/epd-profile/busy_trace.py capture.log --json
 ```
 
-JSON 为 initial_level、registration_err、overflow、capture_complete、origin_us 和 events；events 每条是 `[相对微秒, 诊断帧序号, marker, 原始电平]`。帧序号不是 film 文件中的帧下标。origin_us 是设备单调时钟，非日历时间。
+每次会话输出两条 EPD_BUSY_TRACE。window=early 保留 events 四元组 [相对微秒, call_id, marker, 原始电平]；window=tail 的 frames 按时间排列，每项为 {frame, initial_level, overflow, events}，events 是 [相对微秒, marker, 原始电平]。两者共用 registration_err、overflow、capture_complete 与 origin_us；tail 的 origin_us 是最老保留调用起点，end_us/end_level 是停止采集时刻和电平。partial_frame 为0表示无在途调用，否则是被排除的 call_id；该调用期间不属于完整 tail 覆盖。call_id 计数本会话的全部 Mono driver 调用（含 prepare），不是 film 帧下标；origin_us 是设备单调时钟。
+
 
 | marker | 观测点 |
 |---|---|
@@ -76,3 +77,10 @@ JSON 为 initial_level、registration_err、overflow、capture_complete、origin
 解析器保留等待返回后再次拉低的边沿，不会把一次 high 或没有超时直接当作完成。注册失败、溢出、缺失/乱序 marker、截断记录均不作为完整证据；只有空记录的短 UI 会话不会被当作有效测量。
 
 这是 GPIO ISR 与软件 marker 的对应观测，带有中断延迟，不是逻辑分析仪的硬件捕获，也不测量光学稳定时间。接近同时发生的 marker/IRQ 时间不应按微秒级先后过度解释。需结合 REF、完整忙周期、恢复窗口、下一帧写入以及实体连续动画确认，不能据此猜测删等待。
+
+
+### 最近调用与末段窗口
+
+EPD_MONO_RECENT 保存最后8次调用：[call_id, started_us, total_us, ram_us, ref_us, stages, first_prepare, ok, timeouts, spi_errors]。steady 子对象提供整个会话的 count/ok_count/errors、首末起点、成功耗时之和与最小 REF 对应的 call_id；不受旧192样本上限影响。phase_sum_us 顺序为 [other, init, lut, ram, ref, pon, pof]。旧 EPD_PROFILE_SESSION 仍只统计前192个样本的耗时，不能用它代表后段。
+
+CLI JSON 同时输出 early、tail 与 recent；没有最后一段采样时应明确缺失，不能把启动波形外推到长时间运行。软件调用率仍不等于光学帧率。
