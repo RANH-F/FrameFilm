@@ -43,6 +43,10 @@
 #include "esp_timer.h"
 #include <inttypes.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
+#include "esp_intr_alloc.h"
 #endif
 
 /*********************************************************************
@@ -649,6 +653,125 @@ static struct {
     uint32_t intervals[EPD_PROFILE_SESSION_LIMIT - 1], interval_count;
 } m_profile_session;
 
+/* PROFILE-only: bounded BUSY observation, never used to drive refresh timing.
+ * Entries are [relative_us, frame, marker, level]. Markers: 0=edge,
+ * 1=frame begin, 2=DTM1 before, 3=DTM1 after, 4=RAM done,
+ * 5=REF before, 6=REF+00 after, 7=wait returned, 8=tail returned, 9=DTM1 BUSY wait returned.
+ * Skip the first steady frame; retain four frames and the following begin. */
+#define EPD_BUSY_TRACE_LIMIT 80
+static DRAM_ATTR struct {
+    bool session, active, installed, complete, overflow;
+    int initial_level;
+    esp_err_t registration_err;
+    uint8_t frame;
+    uint16_t count;
+    int64_t origin_us;
+    struct { uint32_t us; uint8_t frame, marker, level; } events[EPD_BUSY_TRACE_LIMIT];
+} m_busy_trace;
+static portMUX_TYPE m_busy_trace_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR epd_busy_trace_record(uint8_t marker)
+{
+    portENTER_CRITICAL_ISR(&m_busy_trace_mux);
+    if (m_busy_trace.active) {
+        if (m_busy_trace.count < EPD_BUSY_TRACE_LIMIT) {
+            const unsigned i = m_busy_trace.count++;
+            m_busy_trace.events[i].us = (uint32_t)(esp_timer_get_time() - m_busy_trace.origin_us);
+            m_busy_trace.events[i].frame = m_busy_trace.frame;
+            m_busy_trace.events[i].marker = marker;
+            m_busy_trace.events[i].level = gpio_ll_get_level(&GPIO, EPD_BUSY_PIN);
+        } else {
+            m_busy_trace.overflow = true;
+            m_busy_trace.active = false;
+        }
+    }
+    portEXIT_CRITICAL_ISR(&m_busy_trace_mux);
+}
+
+static void IRAM_ATTR epd_busy_trace_isr(void *arg)
+{
+    (void)arg;
+    epd_busy_trace_record(0);
+}
+
+static void epd_busy_trace_detach(void)
+{
+    if (!m_busy_trace.installed) return;
+    gpio_intr_disable(EPD_BUSY_PIN);
+    gpio_isr_handler_remove(EPD_BUSY_PIN);
+    gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_DISABLE);
+    m_busy_trace.installed = false;
+}
+
+static void epd_busy_trace_frame(void)
+{
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    const bool stopped = !m_busy_trace.session || m_busy_trace.complete || m_busy_trace.overflow;
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+    if (stopped) return;
+    if (!m_busy_trace.frame) {
+        /* GPIO11 is exclusively EPD BUSY. Existing SD/button ISR service is
+         * reused; never uninstall it. No other handler owns this pin. */
+        esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+        if (err == ESP_ERR_INVALID_STATE) err = ESP_OK;
+        if (err == ESP_OK) err = gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_ANYEDGE);
+        if (err == ESP_OK) err = gpio_isr_handler_add(EPD_BUSY_PIN, epd_busy_trace_isr, NULL);
+        m_busy_trace.registration_err = err;
+        if (err != ESP_OK) {
+            gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_DISABLE);
+            m_busy_trace.complete = true;
+            return;
+        }
+        m_busy_trace.installed = true;
+        portENTER_CRITICAL(&m_busy_trace_mux);
+        m_busy_trace.initial_level = gpio_ll_get_level(&GPIO, EPD_BUSY_PIN);
+        m_busy_trace.origin_us = esp_timer_get_time();
+        m_busy_trace.frame = 1;
+        m_busy_trace.active = true;
+        portEXIT_CRITICAL(&m_busy_trace_mux);
+    } else {
+        portENTER_CRITICAL(&m_busy_trace_mux);
+        m_busy_trace.frame++;
+        portEXIT_CRITICAL(&m_busy_trace_mux);
+    }
+    epd_busy_trace_record(1);
+    if (m_busy_trace.frame == 5) {
+        portENTER_CRITICAL(&m_busy_trace_mux);
+        m_busy_trace.active = false;
+        m_busy_trace.complete = true;
+        portEXIT_CRITICAL(&m_busy_trace_mux);
+        epd_busy_trace_detach();
+    }
+}
+
+static void epd_busy_trace_end(void)
+{
+    if (!m_busy_trace.session) return;
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    m_busy_trace.active = false;
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+    epd_busy_trace_detach();
+    /* At most 80 entries, under 2.5KB: about 220ms on 115200 UART,
+     * below service_film_cancel_pending's 3s bound. No per-frame logging. */
+    static char line[2560];
+    size_t n = (size_t)snprintf(line, sizeof(line),
+        "{\"initial_level\":%d,\"registration_err\":%d,\"overflow\":%s,"
+        "\"capture_complete\":%s,\"origin_us\":%" PRId64 ",\"events\":[",
+        m_busy_trace.initial_level, (int)m_busy_trace.registration_err,
+        m_busy_trace.overflow ? "true" : "false",
+        m_busy_trace.complete && !m_busy_trace.registration_err && !m_busy_trace.overflow ? "true" : "false",
+        m_busy_trace.origin_us);
+    for (unsigned i = 0; i < m_busy_trace.count; i++) {
+        n += (size_t)snprintf(line + n, sizeof(line) - n, "%s[%" PRIu32 ",%u,%u,%u]",
+            i ? "," : "", m_busy_trace.events[i].us,
+            m_busy_trace.events[i].frame, m_busy_trace.events[i].marker,
+            m_busy_trace.events[i].level);
+    }
+    snprintf(line + n, sizeof(line) - n, "]}");
+    sys_logi(EPD_TAG, "EPD_BUSY_TRACE %s", line);
+    memset(&m_busy_trace, 0, sizeof(m_busy_trace));
+}
+
 static int epd_profile_interval_compare(const void *a, const void *b)
 {
     const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
@@ -658,10 +781,14 @@ static int epd_profile_interval_compare(const void *a, const void *b)
 static void epd_profile_session_begin(void)
 {
     memset(&m_profile_session, 0, sizeof(m_profile_session));
+    memset(&m_busy_trace, 0, sizeof(m_busy_trace));
+    m_busy_trace.session = true;
+    m_busy_trace.initial_level = -1;
 }
 
 static void epd_profile_session_end(void)
 {
+    epd_busy_trace_end();
     if (m_profile_session.samples || m_profile_session.dropped) {
         const uint32_t n = m_profile_session.interval_count;
         uint64_t interval_sum = 0;
@@ -693,7 +820,7 @@ static void epd_profile_session_end(void)
                  m_profile_session.timeouts, m_profile_session.spi_errors,
                  m_profile_session.errors ? "false" : "true");
     }
-    epd_profile_session_begin();
+    memset(&m_profile_session, 0, sizeof(m_profile_session));
 }
 
 static void epd_profile_session_add(int64_t total_us, int64_t other_us, bool ok)
@@ -738,6 +865,8 @@ static void epd_profile_begin(const char *path)
     m_profile.busy_ignored = m_ignore_busy;
     m_profile.active = true;
     m_profile.started_us = esp_timer_get_time();
+    if (m_mono_session && !strcmp(path, "mono") && m_profile_session.samples)
+        epd_busy_trace_frame();
 }
 
 static int64_t epd_profile_stage_begin(epd_profile_stage_t stage)
@@ -810,6 +939,7 @@ static void epd_profile_end(void)
              m_profile.busy_ignored ? "true" : "false", ok ? "true" : "false");
 }
 
+#define EPD_BUSY_TRACE(marker) epd_busy_trace_record(marker)
 #define EPD_PROFILE_SESSION_BEGIN() epd_profile_session_begin()
 #define EPD_PROFILE_SESSION_END() epd_profile_session_end()
 #define EPD_PROFILE_BEGIN(path) epd_profile_begin(path)
@@ -824,6 +954,7 @@ static void epd_profile_end(void)
 #define EPD_PROFILE_PREPARE() do { if (m_profile.active) m_profile.first_prepare = true; } while (0)
 #define EPD_PROFILE_REF_COUNT() do { if (m_profile.active) m_profile.stages++; } while (0)
 #else
+#define EPD_BUSY_TRACE(marker) ((void)0)
 #define EPD_PROFILE_SESSION_BEGIN() ((void)0)
 #define EPD_PROFILE_SESSION_END() ((void)0)
 #define EPD_PROFILE_BEGIN(path) ((void)0)
@@ -1219,10 +1350,14 @@ static void epd_spectra_refresh(bool power_on, bool power_off)
 
     EPD_PROFILE_STAGE_BEGIN(REF);
     EPD_PROFILE_REF_COUNT();
+    EPD_BUSY_TRACE(5);
     EPD_W21_WriteCMD(REF);   // 0x12
     EPD_W21_WriteDATA(0x00);
+    EPD_BUSY_TRACE(6);
     epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_REFRESH_MS);
+    EPD_BUSY_TRACE(7);
     vTaskDelay(10 / portTICK_PERIOD_MS);
+    EPD_BUSY_TRACE(8);
 
     EPD_PROFILE_STAGE_END(REF);
 
@@ -1657,8 +1792,11 @@ static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
      * buffer in internal DMA RAM instead of growing the UI/film task stacks. */
     static DMA_ATTR uint8_t batch[EPD_INPUT_LINE * EPD_MONO_BATCH_LINES];
 
+    EPD_BUSY_TRACE(2);
     EPD_W21_WriteCMD(DTM1);   // 0x10
+    EPD_BUSY_TRACE(3);
     epd_wait_busy(BUSY_TIMEOUT_INIT_MS);
+    EPD_BUSY_TRACE(9);
     for (int row = 0; row < EPD_HEIGHT; row += EPD_MONO_BATCH_LINES)
     {
         for (int batch_row = 0; batch_row < EPD_MONO_BATCH_LINES; batch_row++)
@@ -1683,6 +1821,7 @@ static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
         }
         EPD_W21_WriteDATA_Bulk(batch, sizeof(batch));
     }
+    EPD_BUSY_TRACE(4);
     EPD_PROFILE_STAGE_END(RAM);
 }
 

@@ -51,3 +51,28 @@ node --test tools/ForFilm/tests/ark-open-image.test.cjs
 本轮实机对照需先使用聚合采样、原刷新顺序建立基线，再与同样聚合采样的优化版比较。固定同一文件和播放参数；旧的逐帧打印结果只能作为历史参考。
 
 Windows + clang 的 `test_mono_profile.py` 检查真实 C 聚合器及会话生命周期，不连接设备。REF 尾部等待前移的候选已被实体显示测试否决，未保留在固件中。
+
+## BUSY 与 REF 的本屏对应采样
+
+PROFILE 构建还会在少量稳态帧中对 GPIO11 的 BUSY 双边沿做软件时间戳采样，保持原命令、等待、尾延时及电源顺序。跳过首个已统计稳态帧，保留随后四帧及下一帧 begin，最多 80 条记录。IRQ 不输出日志；采集完即移除本引脚 handler，退出会话时输出一条 `EPD_BUSY_TRACE`。不卸载共享 GPIO ISR service，正常构建不增加 IRQ 或 trace 存储。
+
+```powershell
+python tools/epd-profile/busy_trace.py capture.log --json
+```
+
+JSON 为 initial_level、registration_err、overflow、capture_complete、origin_us 和 events；events 每条是 `[相对微秒, 诊断帧序号, marker, 原始电平]`。帧序号不是 film 文件中的帧下标。origin_us 是设备单调时钟，非日历时间。
+
+| marker | 观测点 |
+|---|---|
+| 0 | GPIO 边沿 ISR |
+| 1 | 帧 begin |
+| 2 / 3 | DTM1 命令前 / 命令后 |
+| 9 | DTM1 后 BUSY 等待返回 |
+| 4 | RAM 写入结束 |
+| 5 / 6 | REF 前 / REF 与 0x00 已发送 |
+| 7 | REF BUSY 等待返回 |
+| 8 | 原 10ms 尾延时返回（实际时长取决于 tick 相位） |
+
+解析器保留等待返回后再次拉低的边沿，不会把一次 high 或没有超时直接当作完成。注册失败、溢出、缺失/乱序 marker、截断记录均不作为完整证据；只有空记录的短 UI 会话不会被当作有效测量。
+
+这是 GPIO ISR 与软件 marker 的对应观测，带有中断延迟，不是逻辑分析仪的硬件捕获，也不测量光学稳定时间。接近同时发生的 marker/IRQ 时间不应按微秒级先后过度解释。需结合 REF、完整忙周期、恢复窗口、下一帧写入以及实体连续动画确认，不能据此猜测删等待。

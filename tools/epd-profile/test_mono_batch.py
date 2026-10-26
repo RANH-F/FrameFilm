@@ -45,6 +45,7 @@ typedef unsigned int uint32_t;
 #define BUSY_TIMEOUT_INIT_MS 15000
 #define EPD_PROFILE_STAGE_BEGIN(x)
 #define EPD_PROFILE_STAGE_END(x)
+#define EPD_BUSY_TRACE(x)
 #ifdef _WIN32
 #define EXPORT __declspec(dllexport)
 #else
@@ -159,6 +160,18 @@ class MonoBatchTest(unittest.TestCase):
             bitmap[i] = value
         _, prev = self.compare(bitmap, initial)
         self.compare(rng.randbytes(MONO_BYTES), prev)
+
+    def test_every_old_byte_and_raw_input_byte_pair(self):
+        # Exercise all 65536 pairs through the real old/new C writer loops.
+        # Two full-sized frames preserve complete stream and prev assertions,
+        # including the padded tail and normal row/batch boundaries.
+        for start in range(0, 65536, MONO_BYTES):
+            pairs = [i if i < 65536 else 0
+                     for i in range(start, start + MONO_BYTES)]
+            initial = bytes(i >> 8 for i in pairs)
+            bitmap = bytes(i & 255 for i in pairs)
+            with self.subTest(first_pair=start):
+                self.compare(bitmap, initial)
 
     def test_null_white_clear_matches_zero_bitmap(self):
         initial = random.Random(123).randbytes(MONO_BYTES)
