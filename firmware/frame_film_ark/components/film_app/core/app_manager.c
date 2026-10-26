@@ -369,7 +369,7 @@ static void app_manager_on_sys_event(const sys_event_t *e, void *ctx)
  * 按 ch 查归属 app，与“当前 app”无关：手机可在显示图片时预设动图参数。
  * SET 只调 on_param_set（app 仅改自己的结构体，不刷屏、不落盘），
  * 落盘由本函数按归属 app 完成（见下方 app_state_save_of）；
- * GET 调 on_param_get 组帧后经 service_ble_send_resp 回发。
+ * GET 先确保状态已载入，再调 on_param_get 组帧并经 service_ble_send_resp 回发。
  *
  * @return 1 已消费（是参数通道）；0 非参数通道，交回既有逻辑
  */
@@ -400,7 +400,7 @@ static int app_param_ch_route(uint8_t ch, const uint8_t *data, uint8_t len)
     else
     {
         uint8_t out[APP_PARAM_GET_BUF_MAX];
-        uint8_t n = (owner->on_param_get != NULL) ? owner->on_param_get(out, sizeof(out)) : 0;
+        uint8_t n = app_manager_param_get((uint8_t)owner->id, out, sizeof(out));
         service_ble_send_resp(ch, out, n);
     }
     return 1;
