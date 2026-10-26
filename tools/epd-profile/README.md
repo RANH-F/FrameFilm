@@ -24,3 +24,16 @@ python tools/epd-panel-lab/panel_lab.py --help
 命令返回 0 表示日志有效且样本成功；1 表示有失败样本或损坏记录（仍输出可用统计）；2 表示无法读取或没有完整记录。未开启诊断、只有空日志、只有半条 JSON 都不会被报告为成功实测。
 
 该工具不连接设备，不控制 RTS/DTR，也不写入屏幕。测量数据不能自动证明某个更高频率或未知波形适合该面板。生成的色卡/动画与测量流程见 [同屏测试工具](../epd-panel-lab/README.md)。
+
+
+## RAM 批传输与图片首帧回归
+
+本轮保持40MHz与原LUT，Mono差分数据按4行1440B批发送，整帧172800B不变，成功RAM事务从480降到120。profile增加 `ram_transactions`，旧日志缺少此字段时保持未知，不填0。静态DMA缓冲避免增加UI/film任务栈。
+
+```powershell
+python -m unittest discover -s tools/epd-profile -p test_mono_batch.py -v
+python tools/epd-profile/check_atomic_image_open.py
+node --test tools/ForFilm/tests/ark-open-image.test.cjs
+```
+
+编码测试冻结7737671的真实旧函数，编译当前真实新函数，比较完整SPI字节流和prev状态。原子打开host检查编译实际app/manager/文件解析函数，验证目标首帧、普通恢复、列表去重与失败状态。固件能力和客户端约定见 [0x4B](../../docs/blecmd/blecmd_protocol.md#471-app_switch-0x4b---切换-app)；网页提供 `ArkDevice.openImage(filename)`。成功回包仅表示已提交，不等于屏幕完成；已开始的波形仍正常完成。

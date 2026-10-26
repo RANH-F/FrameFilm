@@ -239,6 +239,11 @@ extern uint32_t service_file_get_count(void);
  */
 extern int service_file_get_filename_safe(uint32_t file_id, char *out, uint32_t out_size);
 
+/* Resolve an exact basename in the current ready playback list under its lock. */
+extern int service_file_find_id(const char *filename, uint32_t *out_id);
+/* Read-only preflight with the same suffix/minimum-size rules as the list. */
+extern bool service_file_has_film(const char *dir, const char *filename);
+
 /**
  * @brief 获取PSRAM缓冲区指针
  *

@@ -750,7 +750,7 @@ static void ble_cmd_process(ble_cmd_t *cmd)
         case BLE_FILM_TRANS_CH_CAPABILITIES_GET:
         {
             if(cmd->len != 0) break;
-            const uint8_t capabilities[5] = {1, 0, 0, 0, 7};
+            const uint8_t capabilities[5] = {1, 0, 0, 0, 15};
             service_ble_send_resp(cmd->ch, capabilities, sizeof(capabilities));
             break;
         }
@@ -1551,6 +1551,12 @@ static void ble_cmd_process(ble_cmd_t *cmd)
             /* payload: [0]=ch, [1..]=命令数据，值语义拷贝，app 侧在自身任务执行 */
             uint8_t evt[SYS_EVENT_PAYLOAD_MAX];
             uint8_t n = cmd->len;
+            if(cmd->ch == BLE_FILM_TRANS_CH_CTRL_APP_SWITCH && n > SYS_EVENT_PAYLOAD_MAX - 1)
+            {
+                uint8_t response[2] = {cmd->pdata[0], 1};
+                service_ble_send_resp(cmd->ch, response, sizeof(response));
+                break;
+            }
             if(n > SYS_EVENT_PAYLOAD_MAX - 1)
             {
                 sys_logw(BEL_SERVICE_TAG, "app cmd 0x%02X len=%u exceeds event payload %u, truncate",

@@ -1390,6 +1390,39 @@ int service_file_get_filename_safe(uint32_t file_id, char *out, uint32_t out_siz
     return ret;
 }
 
+bool service_file_has_film(const char *dir, const char *filename)
+{
+    if(dir == NULL || filename == NULL) return false;
+    const char *ext = strrchr(filename, '.');
+    if(ext == NULL || strcmp(ext, FILM_FILE_EXT) != 0) return false;
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    struct stat st;
+    return n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0 &&
+           S_ISREG(st.st_mode) && st.st_size >= FILM_HEADER_SIZE;
+}
+
+int service_file_find_id(const char *filename, uint32_t *out_id)
+{
+    if(filename == NULL || out_id == NULL) return -1;
+    int ret = -1;
+    file_list_lock();
+    if(m_list_ready && m_file_state.file_list != NULL)
+    {
+        for(uint32_t i = 0; i < m_file_state.file_count; i++)
+        {
+            if(strcmp(filename, m_file_state.file_list[i].filename) == 0)
+            {
+                *out_id = i;
+                ret = 0;
+                break;
+            }
+        }
+    }
+    file_list_unlock();
+    return ret;
+}
+
 uint8_t* service_file_get_buffer(void)
 {
     return m_file_state.psram_buffer;

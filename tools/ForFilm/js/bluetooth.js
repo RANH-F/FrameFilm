@@ -2366,10 +2366,27 @@ function selectDisplayFile() {
         showMessage('请先选择要显示的文件', 'error');
         return;
     }
-    sendBleFileDisplay(window.selectedFileId).then(() => {
-        showMessage('显示命令已发送', 'success');
-        setTimeout(() => {
-            sendBleFileDisplayGet();
-        }, 500);
-    });
+    var atomic = false;
+    var work;
+    if (currentDeviceType === 'FRAMEFILMARK' && window.ArkDevice) {
+        var selected = (window.fileListBuffer || []).find(function (item) {
+            return Number(item.id) === Number(window.selectedFileId);
+        });
+        if (!selected) { showMessage('文件列表已变化，请刷新后重选', 'error'); return; }
+        work = window.ArkDevice.run('确认文件显示应用', async function (ctx) {
+            var page = await ctx.request(0x4C, new Uint8Array());
+            if (page.length !== 1) throw new Error('当前应用响应无效');
+            return page[0];
+        }).then(function (appId) {
+            if (appId === 3) return sendBleFileDisplay(window.selectedFileId);
+            atomic = true;
+            return window.ArkDevice.openImage(selected.filename);
+        });
+    } else {
+        work = sendBleFileDisplay(window.selectedFileId);
+    }
+    return work.then(function () {
+        showMessage(atomic ? '目标图片已提交，等待电子纸刷新完成' : '显示命令已发送', 'info');
+        setTimeout(function () { sendBleFileDisplayGet(); }, 500);
+    }).catch(function (error) { showMessage(error.message, 'error'); });
 }

@@ -37,6 +37,7 @@
 #include "sys_log.h"
 #include <stdint.h>
 #include "sdkconfig.h"
+#include "esp_attr.h"
 
 #ifdef CONFIG_ARK_EPD_PROFILE
 #include "esp_timer.h"
@@ -63,6 +64,7 @@
 #define JD7601_CMD_UNK_E6            0xE6  // 初始化命令（语义待确认）
 
 #define EPD_INPUT_LINE                (EPD_WIDTH / 2)  // 每行字节数（4bpp，720/2=360）
+#define EPD_MONO_BATCH_LINES          (4)  // Matches the SPI bus transfer capacity
 #define EPD_MONO_LINE                 (EPD_WIDTH / 8)  // 每行字节数（1bpp，720/8=90）
 #define EPD_MONO_BYTES                (EPD_WIDTH * EPD_HEIGHT / 8)  // 43200
 
@@ -631,7 +633,7 @@ static struct {
     int64_t started_us;
     int64_t stage_us[EPD_PROFILE_STAGE_COUNT];
     epd_profile_stage_t stage;
-    uint32_t bytes, lut_bytes, ram_bytes, stages, timeouts, spi_errors;
+    uint32_t bytes, lut_bytes, ram_bytes, ram_transactions, stages, timeouts, spi_errors;
     esp_err_t first_error;
     bool first_prepare, mono_session, busy_ignored;
 } m_profile;
@@ -677,7 +679,10 @@ static void epd_profile_spi(esp_err_t err, uint32_t bytes, bool payload)
     }
     m_profile.bytes += bytes;
     if (payload && m_profile.stage == EPD_PROFILE_LUT) m_profile.lut_bytes += bytes;
-    if (payload && m_profile.stage == EPD_PROFILE_RAM) m_profile.ram_bytes += bytes;
+    if (payload && m_profile.stage == EPD_PROFILE_RAM) {
+        m_profile.ram_bytes += bytes;
+        m_profile.ram_transactions++;
+    }
 }
 
 static void epd_profile_end(void)
@@ -693,14 +698,15 @@ static void epd_profile_end(void)
              "\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
              "\"ref_us\":%" PRId64 ",\"pon_us\":%" PRId64 ",\"pof_us\":%" PRId64 ",\"other_us\":%" PRId64 ","
              "\"bytes\":%" PRIu32 ",\"lut_bytes\":%" PRIu32 ",\"ram_bytes\":%" PRIu32 ","
-             "\"stages\":%" PRIu32 ",\"first_prepare\":%s,\"mono_session\":%s,"
+             "\"ram_transactions\":%" PRIu32 ",\"stages\":%" PRIu32 ",\"first_prepare\":%s,\"mono_session\":%s,"
              "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"first_error\":%d,"
              "\"busy_ignored\":%s,\"ok\":%s}",
              m_profile.path, m_profile.started_us, total_us,
              m_profile.stage_us[EPD_PROFILE_INIT], m_profile.stage_us[EPD_PROFILE_LUT],
              m_profile.stage_us[EPD_PROFILE_RAM], m_profile.stage_us[EPD_PROFILE_REF],
              m_profile.stage_us[EPD_PROFILE_PON], m_profile.stage_us[EPD_PROFILE_POF], other_us,
-             m_profile.bytes, m_profile.lut_bytes, m_profile.ram_bytes, m_profile.stages,
+             m_profile.bytes, m_profile.lut_bytes, m_profile.ram_bytes,
+             m_profile.ram_transactions, m_profile.stages,
              m_profile.first_prepare ? "true" : "false", m_profile.mono_session ? "true" : "false",
              m_profile.timeouts, m_profile.spi_errors, (int)m_profile.first_error,
              m_profile.busy_ignored ? "true" : "false", ok ? "true" : "false");
@@ -1541,28 +1547,35 @@ static void epd_spectra_prepare(void)
 static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
 {
     EPD_PROFILE_STAGE_BEGIN(RAM);
-    uint8_t line[EPD_INPUT_LINE];
+    /* Calls are serialized by the UI/direct-display handoff. Keep this 4-row
+     * buffer in internal DMA RAM instead of growing the UI/film task stacks. */
+    static DMA_ATTR uint8_t batch[EPD_INPUT_LINE * EPD_MONO_BATCH_LINES];
 
     EPD_W21_WriteCMD(DTM1);   // 0x10
     epd_wait_busy(BUSY_TIMEOUT_INIT_MS);
-    for (int row = 0; row < EPD_HEIGHT; row++)
+    for (int row = 0; row < EPD_HEIGHT; row += EPD_MONO_BATCH_LINES)
     {
-        const uint8_t *src = mono_bitmap ? (mono_bitmap + row * EPD_MONO_LINE) : NULL;
-        uint8_t *prev = m_mono_prev + row * EPD_MONO_LINE;
-        for (int x = 0; x < EPD_MONO_LINE; x++)
+        for (int batch_row = 0; batch_row < EPD_MONO_BATCH_LINES; batch_row++)
         {
-            uint8_t old = prev[x];
-            uint8_t next = epd_spectra_mono_code_byte(src ? src[x] : 0x00);
-            prev[x] = next;   // 更新上一帧（码位域）
-            for (int j = 0; j < 4; j++)
+            uint8_t *line = batch + batch_row * EPD_INPUT_LINE;
+            const int y = row + batch_row;
+            const uint8_t *src = mono_bitmap ? (mono_bitmap + y * EPD_MONO_LINE) : NULL;
+            uint8_t *prev = m_mono_prev + y * EPD_MONO_LINE;
+            for (int x = 0; x < EPD_MONO_LINE; x++)
             {
-                line[x * 4 + j] = (uint8_t)(((old << 5) & 0x20) | ((next << 4) & 0x10)
-                                            | (old & 2) | ((next >> 1) & 1));
-                old >>= 2;
-                next >>= 2;
+                uint8_t old = prev[x];
+                uint8_t next = epd_spectra_mono_code_byte(src ? src[x] : 0x00);
+                prev[x] = next;   // 更新上一帧（码位域）
+                for (int j = 0; j < 4; j++)
+                {
+                    line[x * 4 + j] = (uint8_t)(((old << 5) & 0x20) | ((next << 4) & 0x10)
+                                                | (old & 2) | ((next >> 1) & 1));
+                    old >>= 2;
+                    next >>= 2;
+                }
             }
         }
-        EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
+        EPD_W21_WriteDATA_Bulk(batch, sizeof(batch));
     }
     EPD_PROFILE_STAGE_END(RAM);
 }

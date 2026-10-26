@@ -5,6 +5,7 @@
  * INCLUDES
  */
 #include <stdint.h>
+#include <stdbool.h>
 #include "hal_input.h"
 #include "ui_core.h"    /* app_ui_ops_t 前向声明 + ui_core_* 声明（本身不含 lvgl） */
 
@@ -18,7 +19,7 @@ extern "C" {
 /*********************************************************************
  * MACROS
  */
-#define APP_EVENT_PAYLOAD_MAX   (16)    // 事件内联负载上限（与 sys_event 对齐）
+#define APP_EVENT_PAYLOAD_MAX   (192)    // 事件内联负载上限（与 sys_event 对齐）
 
 /**
  * @brief 按键占用掩码（用于 app_entry_t.keys）
@@ -165,6 +166,11 @@ typedef struct {
      * 用 service_file_get_count() 判断"这个目录里有没有内容"。
      */
     const char *(*enter_block_reason)(void);
+
+    /* Optional atomic open: resolve a basename after data_dir is ready, before
+       stopping the old app. Keep the one-shot target outside persisted state.
+       false must leave app state unchanged. Only IMAGE currently supports it. */
+    bool (*prepare_open)(const char *filename);
 
     /* ---- 显示层归属 ---- */
     app_layer_t layer;              // 跑在哪一层；默认 APP_LAYER_DIRECT

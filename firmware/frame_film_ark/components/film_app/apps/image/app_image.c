@@ -70,6 +70,11 @@ _Static_assert(sizeof(app_image_state_t) <= SERVICE_PARAM_APP_DATA_MAX,
  * LOCAL VARIABLES
  */
 static app_image_state_t m_image;
+/* First draw is owned by the enter/boot/save path, not load_complete:
+   the file task may still be loading after the first display was queued. */
+static bool m_first_draw_pending = false;
+static uint32_t m_open_file_id = FILE_ID_NONE;
+static bool m_skip_boot_advance = false;
 static uint32_t m_elapsed_s = 0;   // 定时切换累计秒数（RAM，不持久化）
 
 static const app_image_state_t m_image_default = {
@@ -96,6 +101,7 @@ static uint8_t app_image_param_get(uint8_t *out, uint8_t max);
 static void image_show(uint32_t file_id);
 static void image_show_next(void);
 static const char *app_image_enter_block_reason(void);
+static bool app_image_prepare_open(const char *filename);
 
 /*********************************************************************
  * GLOBAL VARIABLES
@@ -112,6 +118,7 @@ const app_entry_t g_app_image_entry = {
     .on_event = app_image_on_event,
     .on_tick = app_image_on_tick,
     .enter_block_reason = app_image_enter_block_reason,
+    .prepare_open = app_image_prepare_open,
 
     /* 状态持久化：休眠唤醒后仍能记住播放模式 / 间隔 / 当前下标 */
     .state = &m_image,
@@ -156,6 +163,7 @@ static void image_show(uint32_t file_id)
     }
 
     m_elapsed_s = 0;   // 手动或自动换图都重新计时
+    m_first_draw_pending = false;
     service_film_display(file_id);
 }
 
@@ -205,8 +213,25 @@ static bool image_boot_advance_effective(void)
     return m_image.play_mode == APP_IMAGE_PLAY_AUTO && g_service_param.sleep.sleep_mode == 1;
 }
 
+static bool app_image_prepare_open(const char *filename)
+{
+    uint32_t file_id;
+    if(service_file_find_id(filename, &file_id) != 0) return false;
+    m_open_file_id = file_id;
+    return true;
+}
+
 static void app_image_on_enter(void)
 {
+    m_first_draw_pending = true;
+    m_skip_boot_advance = m_open_file_id != FILE_ID_NONE;
+    if(m_skip_boot_advance)
+    {
+        uint32_t file_id = m_open_file_id;
+        m_open_file_id = FILE_ID_NONE;
+        image_show(file_id);
+        return;
+    }
     sys_logi(APP_IMAGE_TAG, "enter image app, count=%u id=%u",
              (unsigned)service_file_get_count(), (unsigned)m_image.file_id);
 
@@ -215,6 +240,8 @@ static void app_image_on_enter(void)
        每屏约 1s，看着像"第一张刷新了两次"（见 app_manager_boot_advance_pending） */
     if(app_manager_boot_advance_pending() && image_boot_advance_effective())
     {
+        /* APP_EVT_BOOT owns this first draw, including late list events. */
+        m_first_draw_pending = false;
         sys_logi(APP_IMAGE_TAG, "boot auto switch pending, defer first draw");
         return;
     }
@@ -254,6 +281,11 @@ static void app_image_on_event(const app_event_t *e)
     /* 开机自动：仅启动后投递一次（用户手动切回图片 app 不会触发） */
     if(e->type == APP_EVT_BOOT)
     {
+        if(m_skip_boot_advance)
+        {
+            m_skip_boot_advance = false;
+            return;
+        }
         if(image_boot_advance_effective())
         {
             sys_logi(APP_IMAGE_TAG, "boot auto switch");
@@ -288,8 +320,7 @@ static void app_image_on_event(const app_event_t *e)
             break;
         }
         /* 列表刷新完成：若尚未显示过（首帧竞态/列表晚于超时到达），补显一次 */
-        if(service_file_get_count() > 0 &&
-           service_file_get_load_complete() != FILE_LOAD_STATE_DONE)
+        if(m_first_draw_pending && service_file_get_count() > 0)
         {
             sys_logi(APP_IMAGE_TAG, "list ready, display id=%u", (unsigned)m_image.file_id);
             image_show(m_image.file_id);

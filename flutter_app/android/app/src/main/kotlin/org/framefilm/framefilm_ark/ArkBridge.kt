@@ -970,7 +970,9 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         checkPassportAvailable()
         val id = call.argument<Number>("id")?.toInt()
         if (call.method in setOf("displayDeviceFile", "deleteDeviceFile")) {
-            require(id != null && id in 0..255 && filesLoaded && deviceFiles[id] == call.argument<String>("name")) {
+            val imageByName = call.method == "displayDeviceFile" && fileDirectory == "film"
+            require(id != null && id >= 0 && (imageByName || id <= 255) &&
+                filesLoaded && deviceFiles[id] == call.argument<String>("name")) {
                 "文件列表已变化，请刷新后重试"
             }
         }
@@ -1026,15 +1028,16 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     }
 
     private fun displayDeviceFile(@Suppress("UNUSED_PARAMETER") id: Int, expectedName: String) {
-        val targetApp = if (fileDirectory == "film") 0 else 3
+        if (fileDirectory == "film") { displayImageByName(expectedName); return }
+        val targetApp = 3
         writeFilesCommand(0x4B, byteArrayOf(targetApp.toByte())) {
             main.postDelayed({ if (connected && refreshing) request(0x4C) { page ->
                 require(page.size == 1 && (page[0].toInt() and 255) == targetApp) { "设备未进入目标 app，请等待设备就绪后重试" }
                 listActiveDeviceFiles {
                     val activeId = deviceFiles.entries.firstOrNull { it.value == expectedName }?.key
                     if (activeId == null || activeId !in 0..255) { finishSettings("文件列表已变化，请刷新重选", true); return@listActiveDeviceFiles }
-                    val channel = if (targetApp == 0) 0x45 else 0x49
-                    val tag = if (targetApp == 0) 3 else 4
+                    val channel = 0x49
+                    val tag = 4
                     writeFilesCommand(channel, byteArrayOf(tag.toByte(), 4, 0, 0, 0, activeId.toByte())) {
                         request(channel + 1) { parameters ->
                             var offset = 0
@@ -1052,6 +1055,46 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                     }
                 }
             } }, 400)
+        }
+    }
+
+    private fun displayImageByName(expectedName: String) {
+        val filename = expectedName.toByteArray(Charsets.UTF_8)
+        if (filename.size !in 1..189 || expectedName.any { it == '\u0000' || it == '/' || it == '\\' } ||
+            expectedName == "." || expectedName == "..") {
+            finishSettings("图片文件名无效或超过 189 字节，请重命名后刷新重试", true)
+            return
+        }
+        request(0x59) { capabilities ->
+            require(capabilities.size == 5 && capabilities[0].toInt() == 1) { "设备能力响应无效，请升级 Ark 固件后重试" }
+            if ((u32(capabilities, 1) and 8L) == 0L) {
+                finishSettings("此固件不支持按文件名直接打开图片，请升级 Ark 固件后重试", true)
+                return@request
+            }
+            request(0x4B, byteArrayOf(0) + filename + byteArrayOf(0)) { response ->
+                require(response.size == 2 && response[0] == 0.toByte()) { "打开图片响应无效，请重新连接后重试" }
+                when (response[1].toInt() and 255) {
+                    // Success confirms that the target first frame was submitted, not displayed.
+                    0 -> listDeviceFiles()
+                    1 -> finishSettings("设备不支持此图片打开请求，请升级 Ark 固件并刷新后重试", true)
+                    2 -> finishSettings("图片已不存在，请刷新目录后重新选择", true)
+                    3 -> finishSettings("设备正在开机、休眠或处理目录，请等待设备就绪后重试", true)
+                    else -> finishSettings("设备返回未知的图片打开状态，请刷新后重试", true)
+                }
+            }
+            pending?.takeIf { it.channel == 0x4B }?.let { read ->
+                read.timeout?.let(main::removeCallbacks)
+                // A previous full-screen waveform may still be completing.
+                read.timeout = Runnable {
+                    if (pending === read) failRead("timeout", "打开图片响应超时，请重新连接并刷新后重试")
+                }.also { main.postDelayed(it, 45_000) }
+            }
+        }
+        pending?.takeIf { it.channel == 0x59 }?.let { read ->
+            read.timeout?.let(main::removeCallbacks)
+            read.timeout = Runnable {
+                if (pending === read) failRead("unsupported_firmware", "无法读取图片打开能力，请升级 Ark 固件后重新连接重试")
+            }.also { main.postDelayed(it, 7_000) }
         }
     }
 

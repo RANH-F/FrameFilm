@@ -172,6 +172,29 @@
         emit();
         return true;
     }
+    async function openImage(name) {
+        if (typeof name !== 'string' || !name || name === '.' || name === '..' ||
+            name.indexOf('/') !== -1 || name.indexOf('\\') !== -1 || name.indexOf('\0') !== -1)
+            throw new Error('图片文件名无效，请从设备目录重新选择');
+        var encoded = new TextEncoder().encode(name);
+        if (encoded.length > 189) throw new Error('图片文件名超过 189 个 UTF-8 字节');
+        return run('按文件名打开图片', async function (ctx) {
+            var capabilities = await ctx.request(0x59, new Uint8Array());
+            if (capabilities.length !== 5 || capabilities[0] !== 1 || (capabilities[4] & 8) === 0)
+                throw new Error('此固件不支持按文件名打开图片，请升级 Ark 固件');
+            var payload = new Uint8Array(encoded.length + 2);
+            payload[0] = 0;
+            payload.set(encoded, 1);
+            var reply = await ctx.request(0x4B, payload, 45000);
+            if (reply.length !== 2 || reply[0] !== 0)
+                throw new Error('打开图片响应无效，请重连后重试');
+            if (reply[1] === 1) throw new Error('设备不支持本次打开参数，请检查文件名或升级固件');
+            if (reply[1] === 2) throw new Error('图片目录中未找到该文件，请刷新后重新选择');
+            if (reply[1] === 3) throw new Error('设备正在忙，请等待当前操作结束后重试');
+            if (reply[1] !== 0) throw new Error('设备打开图片失败，请重试');
+            return { submitted: true, name: name };
+        });
+    }
     async function reconnect() {
         if (active) throw new Error('操作进行中，不能重连');
         if (!transport || !transport.reconnect) throw new Error('当前浏览器没有已授权 Ark 设备');
@@ -180,5 +203,5 @@
         return connected();
     }
     root.ArkDevice = { connected: connected, busy: busy, run: run, cancel: cancel,
-        reconnect: reconnect, bind: bind, disconnected: disconnected, notification: notification };
+        reconnect: reconnect, openImage: openImage, bind: bind, disconnected: disconnected, notification: notification };
 })(window);

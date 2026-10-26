@@ -40,6 +40,12 @@ class ProfileSummaryTest(unittest.TestCase):
         self.assertEqual(steady["largest_phase"], "ref_us")
         self.assertEqual(len(report["groups"]), 2)
 
+    def test_ram_transaction_metric_preserves_older_log_unknown_state(self):
+        current = summarize([sample(ram_transactions=120)], [])
+        self.assertEqual(current["groups"][0]["mean_ram_transactions"], 120)
+        old = summarize([sample()], [])
+        self.assertNotIn("mean_ram_transactions", old["groups"][0])
+
     def test_empty_log_does_not_report_zero_as_measurement(self):
         with patch("sys.stdin", io.StringIO("")), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main([]), 2)

@@ -33,6 +33,8 @@ def parse_records(lines: Iterable[str]) -> tuple[list[dict], list[dict]]:
             for key in ("total_us", "started_us", "timeouts", "spi_errors", "bytes", "stages", *DURATIONS):
                 if type(value.get(key)) is not int or value[key] < 0:
                     raise ValueError(f"{key} must be a non-negative integer")
+            if "ram_transactions" in value and (type(value["ram_transactions"]) is not int or value["ram_transactions"] < 0):
+                raise ValueError("ram_transactions must be a non-negative integer")
             if value["total_us"] == 0:
                 raise ValueError("total_us must be positive")
             records.append(value)
@@ -69,6 +71,8 @@ def summarize(records: list[dict], errors: list[dict]) -> dict:
                 "mean_bytes": round(statistics.fmean(row["bytes"] for row in good), 2),
                 "mean_refresh_stages": round(statistics.fmean(row["stages"] for row in good), 2),
             })
+        if good and all("ram_transactions" in row for row in good):
+            group["mean_ram_transactions"] = statistics.fmean(row["ram_transactions"] for row in good)
         groups.append(group)
     return {
         "scope": "driver_call",

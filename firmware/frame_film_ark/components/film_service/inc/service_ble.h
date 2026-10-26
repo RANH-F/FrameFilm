@@ -79,7 +79,7 @@ extern "C"{
 // 注意：0x43 / 0x44 归 dock 底座固件（USB HID 键盘键值设置/查询，见 frame_film_dock 的
 // service_cmd.h），冰箱贴固件不使用这两个命令号。app 控制通道排在 app 参数通道之后，
 // 使 0x45~0x4C 成为连续的 app 通道区间。
-#define BLE_FILM_TRANS_CH_CTRL_APP_SWITCH                  (0x4B) // 切换 app（1字节 app_id，app 层消费）
+#define BLE_FILM_TRANS_CH_CTRL_APP_SWITCH                  (0x4B) // app_id; optional IMAGE basename + NUL (targeted-open response: app_id,status)
 #define BLE_FILM_TRANS_CH_CTRL_APP_CURRENT_GET             (0x4C) // 查询当前 app（返回 1字节 app_id）
 
 // 时间同步：4字节大端 Unix 秒（UTC）+ 2字节大端时区（距 UTC 分钟数，东为正，东八区=+480）。
@@ -105,7 +105,7 @@ extern "C"{
 #define BLE_FILM_TRANS_CH_BUILD_INFO_GET (0x56)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_START (0x57)
 #define BLE_FILM_TRANS_CH_DIRECT_OTA_APPLY (0x58)
-#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark 能力版本 + flags；bit0=彩色通行证、bit1=通用 WiFi 文件、bit2=只读目录与统计
+#define BLE_FILM_TRANS_CH_CAPABILITIES_GET (0x59) // Ark version + flags: bit0=color pass, bit1=WiFi file, bit2=catalog, bit3=atomic IMAGE open
 #define BLE_FILM_TRANS_CH_STORAGE_CATALOG (0x5B) // Ark read-only storage/catalog
 #define BLE_FILM_TRANS_CH_DIRECT_FILE_START (0x5A) // SSID\0PASSWORD\0URL\0相对路径\0
 #define BLE_DIRECT_START_DATA_MAX                         (192)
