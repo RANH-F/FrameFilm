@@ -263,7 +263,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "saveGeneratedFilm" -> {
                     check(saveFilmResult == null) { "正在保存文件" }
                     val bytes = requireNotNull(call.argument<ByteArray>("bytes")) { "缺少 film 数据" }
-                    require(bytes.size in 32..(32 * 1024 * 1024)) { "film 文件大小无效" }
+                    require(bytes.size in 32..FilmConverter.MAX_FILM_BYTES) { "film 文件大小无效" }
                     val name = (call.argument<String>("name") ?: "frame.film").substringAfterLast('/').substringAfterLast('\\')
                     saveFilmResult = result; saveFilmBytes = bytes
                     try {
@@ -1357,7 +1357,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private fun importGeneratedFilm(call: MethodCall, result: MethodChannel.Result) {
         checkReplace()
         val bytes = requireNotNull(call.argument<ByteArray>("bytes")) { "缺少 film 数据" }
-        require(bytes.size in 32..(32 * 1024 * 1024)) { "film 文件大小无效" }
+        require(bytes.size in 32..FilmConverter.MAX_FILM_BYTES) { "film 文件大小无效" }
         val requestedName = call.argument<String>("name") ?: "ark_frame.film"
         importing = true; importResult = result; emit()
         worker.execute {
@@ -1602,8 +1602,8 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                             if (count < 0) break
                             if (Thread.currentThread().isInterrupted) error("导入已取消")
                             total += count
-                            val limit = if (firmware) 4L * 1024 * 1024 else 32L * 1024 * 1024
-                            require(total <= limit) { if (firmware) "固件超过 Ark 4 MiB Flash 容量" else "film 超过 32 MiB" }
+                            val limit = if (firmware) 4L * 1024 * 1024 else FilmConverter.MAX_FILM_BYTES.toLong()
+                            require(total <= limit) { if (firmware) "固件超过 Ark 4 MiB Flash 容量" else "film 超过 128 MiB" }
                             output.write(buffer, 0, count)
                         }
                     }

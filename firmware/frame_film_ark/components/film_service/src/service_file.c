@@ -41,6 +41,7 @@
 #include "freertos/semphr.h"
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 
 #include "sys_log.h"
 #include "sys_event.h"
@@ -112,6 +113,8 @@ static TaskHandle_t m_file_task_hdl = NULL;
 static QueueHandle_t m_file_msg_hdl = NULL;
 static TimerHandle_t m_file_timer = NULL;
 static file_service_state_t m_file_state;
+/* file_task is the sole writer. DMA_ATTR keeps this out of RTC FAST heap. */
+static DMA_ATTR uint8_t m_save_dma_buffer[4096];
 static SemaphoreHandle_t m_file_list_mutex = NULL;  // 保护 file_list/file_count 跨任务访问
 static SemaphoreHandle_t m_save_call_mutex = NULL;
 static SemaphoreHandle_t m_save_done = NULL;
@@ -126,6 +129,36 @@ static volatile uint8_t m_list_ready = 0;           // 当前目录列表是否�
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
+/* Keep full-sector writes aligned in both the file and normal DMA DRAM.
+ * Partial sectors still go through FatFS, but never pass the PSRAM source. */
+static size_t file_save_write_dma(FILE *fp, const uint8_t *data, size_t len, uint32_t offset)
+{
+    size_t written = 0;
+    while(written < len)
+    {
+        size_t remaining = len - written;
+        size_t partial = (offset + written) % 512;
+        size_t count;
+        if(partial != 0)
+        {
+            count = 512 - partial;
+            if(count > remaining) count = remaining;
+        }
+        else if(remaining >= 512)
+        {
+            count = remaining > sizeof(m_save_dma_buffer) ? sizeof(m_save_dma_buffer) : remaining;
+            count -= count % 512;
+        }
+        else count = remaining;
+
+        memcpy(m_save_dma_buffer, data + written, count);
+        size_t saved = fwrite(m_save_dma_buffer, 1, count, fp);
+        written += saved;
+        if(saved != count) break;
+    }
+    return written;
+}
+
 static void file_log_header(const char *stage, const uint8_t *hdr, size_t len)
 {
     char hex[FILM_HEADER_SIZE * 2 + 1];
@@ -381,6 +414,12 @@ static void file_task_handle(void *pvParameters)
                 m_file_state.save_file_handle = fopen(m_file_state.save_part_path, "wb");
                 if(m_file_state.save_file_handle)
                 {
+                    if(setvbuf(m_file_state.save_file_handle, NULL, _IONBF, 0) != 0)
+                    {
+                        fclose(m_file_state.save_file_handle);
+                        m_file_state.save_file_handle = NULL;
+                        goto save_start_done;
+                    }
                     m_file_state.save_file_size = msg.file_size;
                     m_file_state.save_written = 0;
                     m_file_state.save_header_len = 0;
@@ -410,7 +449,8 @@ save_start_done:
                         m_file_state.save_header_len += take;
                         file_log_header("prewrite", m_file_state.save_header, m_file_state.save_header_len);
                     }
-                    size_t written = fwrite(msg.pdata, 1, msg.data_len, m_file_state.save_file_handle);
+                    size_t written = file_save_write_dma(m_file_state.save_file_handle, msg.pdata,
+                                                         msg.data_len, m_file_state.save_written);
                     m_file_state.save_written += written;
                     if(written == msg.data_len) m_save_result = 0;
                     else m_file_state.save_failed = 1;

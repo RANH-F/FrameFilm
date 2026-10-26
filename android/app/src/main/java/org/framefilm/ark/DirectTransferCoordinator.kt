@@ -101,7 +101,9 @@ class DirectTransferCoordinator(
         }
         active = true
         total = file.length()
-        deadline = Runnable { stop("直传超过 180 秒") }.also { main.postDelayed(it, 180_000) }
+        val timeoutMs = if (firmware != null) 180_000L else total * 1000L / 32768L + 180_000L
+        deadline = Runnable { stop("直传超过 ${timeoutMs / 1000} 秒") }
+            .also { main.postDelayed(it, timeoutMs) }
         emit("preparing", "核对 Ark 及原有 Wi-Fi 配置")
         if (firmware != null) {
             emit("validating", "核对 Wi-Fi OTA 能力与目标分区")

@@ -473,6 +473,7 @@ static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *re
             }
         }
         saving = true;
+        /* Allow long files while data continues to be saved. */
         uint32_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
         while(received < total)
         {
@@ -520,6 +521,7 @@ static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *re
                 break;
             }
             received += (uint32_t)got;
+            deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
             *received_out = received;
             wifi_direct_status(WIFI_DIRECT_DOWNLOADING, 0, received, total);
         }
@@ -625,6 +627,8 @@ static void wifi_direct_task(void *arg)
     bool wifi_touched = false;
     wifi_config_t old_config = {0};
     bool have_config = false;
+    wifi_ps_type_t old_ps = WIFI_PS_NONE;
+    bool have_ps = false;
 
     /* A heartbeat may already be in its HTTP request. Let it finish before changing STA. */
     uint32_t wait_start = xTaskGetTickCount();
@@ -650,6 +654,14 @@ static void wifi_direct_task(void *arg)
     }
     if(!error && (was_initialized ? hal_wifi_set_ram_storage(true) : hal_wifi_init(true)) != ESP_OK)
         error = WIFI_DIRECT_ERR_RESOURCE;
+    if(!error)
+    {
+        esp_err_t ps_err = hal_wifi_get_power_save(&old_ps);
+        have_ps = ps_err == ESP_OK;
+        if(have_ps) ps_err = hal_wifi_set_power_save(WIFI_PS_NONE);
+        if(ps_err != ESP_OK)
+            sys_logw(WIFI_SERVICE_TAG, "Direct power-save boost unavailable: %s", esp_err_to_name(ps_err));
+    }
     if(!error && hal_wifi_connect(args->ssid, args->password) != ESP_OK)
         error = WIFI_DIRECT_ERR_CONNECT;
     if(!error && !wifi_direct_wait_connected(25000, true))
@@ -658,6 +670,8 @@ static void wifi_direct_task(void *arg)
                                 wifi_direct_download(args, &received, &total);
 
     wifi_direct_status(WIFI_DIRECT_RESTORING, error, received, total);
+    if(have_ps && hal_wifi_set_power_save(old_ps) != ESP_OK)
+        error = WIFI_DIRECT_ERR_RESTORE;
     if(wifi_touched && was_initialized)
     {
         hal_wifi_disconnect();

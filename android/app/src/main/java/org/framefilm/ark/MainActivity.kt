@@ -391,7 +391,7 @@ class MainActivity : Activity(), ArkUi.Actions {
                         checkNotNull(contentResolver.openInputStream(uri)).use { input -> file.outputStream().use { out ->
                             val buffer = ByteArray(8192); var count: Int; var total = 0L
                             while (input.read(buffer).also { count = it } != -1) {
-                                total += count; require(total <= 32L * 1024 * 1024) { "film 超过 32 MiB" }; out.write(buffer, 0, count)
+                                total += count; require(total <= FilmConverter.MAX_FILM_BYTES) { "film 超过 128 MiB" }; out.write(buffer, 0, count)
                             }
                         } }
                         val info = FilmConverter.validate(file)

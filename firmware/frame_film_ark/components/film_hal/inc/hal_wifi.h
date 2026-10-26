@@ -16,5 +16,7 @@ bool hal_wifi_connected(void);
 esp_err_t hal_wifi_get_sta_config(wifi_config_t *config);
 esp_err_t hal_wifi_set_sta_config(const wifi_config_t *config);
 esp_err_t hal_wifi_set_ram_storage(bool ram_storage);
+esp_err_t hal_wifi_get_power_save(wifi_ps_type_t *type);
+esp_err_t hal_wifi_set_power_save(wifi_ps_type_t type);
 
 #endif /* __HAL_WIFI_H__ */
