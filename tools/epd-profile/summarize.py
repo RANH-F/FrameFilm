@@ -82,6 +82,84 @@ def summarize(records: list[dict], errors: list[dict]) -> dict:
     }
 
 
+
+def parse_sessions(lines: Iterable[str]) -> tuple[list[dict], list[dict]]:
+    """Read bounded Mono session aggregates, never treating them as one frame."""
+    sessions, errors = [], []
+    for number, line in enumerate(lines, 1):
+        marker = "EPD_PROFILE_SESSION "
+        start = line.find(marker)
+        if start < 0:
+            continue
+        try:
+            row, _ = json.JSONDecoder().raw_decode(line[start + len(marker):].lstrip())
+            if row.get("path") != "mono" or row.get("scope") != "mono_session" or row.get("unit") != "us":
+                raise ValueError("unsupported session scope or unit")
+            keys = ("sample_count", "ok_samples", "error_samples", "dropped_samples",
+                    "first_started_us", "last_started_us", "interval_count", "interval_min_us",
+                    "interval_max_us", "interval_sum_us", "total_min_us", "total_max_us",
+                    "total_sum_us", "bytes_sum", "ram_bytes_sum", "ram_transactions_sum",
+                    "stages_sum", "timeouts", "spi_errors")
+            for key in keys:
+                if type(row.get(key)) is not int or row[key] < 0:
+                    raise ValueError(f"{key} must be a non-negative integer")
+            if type(row.get("interval_p50_us")) not in (int, float) or row["interval_p50_us"] < 0:
+                raise ValueError("interval_p50_us must be non-negative")
+            if row["sample_count"] < 1 or row["ok_samples"] > row["sample_count"]:
+                raise ValueError("invalid sample counts")
+            if row["interval_count"] > row["sample_count"] - 1:
+                raise ValueError("invalid interval count")
+            for key in DURATIONS:
+                value = row.get("sum_us", {}).get(key)
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"sum_us.{key} must be a non-negative integer")
+            if row["ok_samples"] and row["total_sum_us"] == 0:
+                raise ValueError("successful timings cannot be zero")
+            sessions.append(row)
+        except (ValueError, TypeError, AttributeError) as error:
+            errors.append({"line": number, "error": str(error)})
+    return sessions, errors
+
+
+def summarize_sessions(sessions: list[dict]) -> list[dict]:
+    groups = []
+    for row in sessions:
+        count = row["ok_samples"]
+        group = {
+            "path": "mono", "scope": "mono_session", "first_prepare": False, "mono_session": True,
+            "samples": row["sample_count"], "successful": count,
+            "failed": row["sample_count"] - count,
+            "observed_error_samples": row["error_samples"],
+            "dropped_samples": row["dropped_samples"],
+            "timeouts": row["timeouts"], "spi_errors": row["spi_errors"],
+            "first_started_us": row["first_started_us"], "last_started_us": row["last_started_us"],
+        }
+        if count:
+            mean = row["total_sum_us"] / count
+            phases = {key: round(row["sum_us"][key] / count, 2) for key in DURATIONS}
+            group.update(
+                total_us={"min": row["total_min_us"], "mean": round(mean, 2), "max": row["total_max_us"]},
+                mean_phase_us=phases, largest_phase=max(phases, key=phases.get),
+                mean_bytes=row["bytes_sum"] / count,
+                mean_ram_bytes=row["ram_bytes_sum"] / count,
+                mean_ram_transactions=row["ram_transactions_sum"] / count,
+                mean_refresh_stages=row["stages_sum"] / count,
+                mean_driver_call_capacity_per_second=round(1_000_000 / mean, 3),
+            )
+        intervals = row["interval_count"]
+        if intervals:
+            median = row["interval_p50_us"]
+            group["observed_start_interval_us"] = {
+                "samples": intervals, "min": row["interval_min_us"], "median": median,
+                "mean": row["interval_sum_us"] / intervals, "max": row["interval_max_us"],
+            }
+            if median > 0:
+                group["observed_start_rate_per_second"] = 1_000_000 / median
+            if row["interval_sum_us"] > 0:
+                group["observed_mean_start_rate_per_second"] = 1_000_000 * intervals / row["interval_sum_us"]
+        groups.append(group)
+    return groups
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", nargs="?", default="-", help="UTF-8 serial log, or - for stdin")
@@ -89,38 +167,46 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.log == "-":
-            records, errors = parse_records(sys.stdin)
+            lines = list(sys.stdin)
         else:
-            with Path(args.log).open(encoding="utf-8-sig", errors="replace") as stream:
-                records, errors = parse_records(stream)
+            lines = Path(args.log).read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        records, errors = parse_records(lines)
+        sessions, session_errors = parse_sessions(lines)
+        errors.extend(session_errors)
     except OSError as error:
         print(f"Cannot read serial log: {error}", file=sys.stderr)
         return 2
-    if not records:
+    if not records and not sessions:
         print("No complete EPD_PROFILE records. Enable CONFIG_ARK_EPD_PROFILE, capture a refresh, then retry.", file=sys.stderr)
         for error in errors:
             print(f"line {error['line']}: {error['error']}", file=sys.stderr)
         return 2
     report = summarize(records, errors)
+    if sessions:
+        report["sessions"] = summarize_sessions(sessions)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print("Driver timing only; these values are not observed animation FPS.")
-        for group in report["groups"]:
+        print("Driver timing is not animation FPS; session start intervals measure observed calls.")
+        for group in report["groups"] + report.get("sessions", []):
             state = "prepare" if group["first_prepare"] else "steady"
             print(f"{group['path']} / {state} / session={group['mono_session']}: "
                   f"{group['successful']}/{group['samples']} successful")
             if "total_us" in group:
                 total = group["total_us"]
-                print(f"  median {total['median'] / 1000:.2f} ms; mean {total['mean'] / 1000:.2f} ms; "
-                      f"largest phase {group['largest_phase']}")
+                print(f"  mean {total['mean'] / 1000:.2f} ms; largest phase {group['largest_phase']}")
                 print("  " + ", ".join(f"{key[:-3]}={value / 1000:.2f} ms"
                                       for key, value in group["mean_phase_us"].items()))
-            if group["failed"]:
-                print(f"  failures={group['failed']}, timeouts={group['timeouts']}, SPI errors={group['spi_errors']}")
+            if "observed_start_rate_per_second" in group:
+                print(f"  observed median-interval rate {group['observed_start_rate_per_second']:.3f}/s "
+                      f"({group['observed_start_interval_us']['samples']} intervals)")
+            if group["failed"] or group.get("observed_error_samples"):
+                print(f"  failures={group['failed']}, observed errors={group.get('observed_error_samples', group['failed'])}, "
+                      f"timeouts={group['timeouts']}, SPI errors={group['spi_errors']}")
     for error in errors:
         print(f"line {error['line']}: incomplete or invalid profile record: {error['error']}", file=sys.stderr)
-    return 1 if errors or any(not row["ok"] for row in records) else 0
+    return 1 if errors or any(not row["ok"] for row in records) or any(
+        row["error_samples"] or row["timeouts"] or row["spi_errors"] for row in sessions) else 0
 
 
 if __name__ == "__main__":

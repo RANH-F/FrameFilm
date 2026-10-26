@@ -1,10 +1,10 @@
 # Ark 屏幕刷新诊断
 
-目标为 HINK-T037A02-A1 / EPD037A02，JD7601，原生 720×480。仅使用现有刷新波形，不改变驱动时序或 SPI 频率。屏幕显示版本保持 3.2.5。
+目标为 HINK-T037A02-A1 / EPD037A02，JD7601，原生 720×480。保留原刷新波形、SPI 频率和等待顺序；时序候选的失败及恢复见[同屏实测记录](../../docs/film/epd037a02.md)，不将驱动调用计数当成有效显示帧率。屏幕显示版本保持 3.2.5。
 
 在 ESP-IDF menuconfig 的 **Ark EPD diagnostics** 打开 **Enable per-frame driver timing**（`CONFIG_ARK_EPD_PROFILE=y`），构建诊断固件。默认关闭，正常固件不记录逐帧数据。请将诊断构建及 sdkconfig 副本放在 D 盘，避免覆盖正常产物。
 
-烧录后记录 115200 波特率串口日志。每次公开 MonoFast / ColorFast / ColorQual 调用产生一行 `EPD_PROFILE {...}`；同一调用内的准备清屏、波形切换与多阶段刷新合并在该条记录中。
+烧录后记录 115200 波特率串口日志。ColorFast / ColorQual 及 Mono 冷帧、含 INIT/PON 的调用产生 `EPD_PROFILE {...}`；同一调用内的准备清屏、波形切换与多阶段刷新合并在该条记录中。Mono 稳态在内存聚合，退出会话时仅输出一条 `EPD_PROFILE_SESSION {...}`，播放期间不逐帧打印。
 
 ```powershell
 python tools/epd-profile/summarize.py capture.log
@@ -19,7 +19,7 @@ python tools/epd-panel-lab/panel_lab.py --help
 - `started_us`：设备启动后的单调时钟，用于对照，不是日历时间。
 - `bytes/lut_bytes/ram_bytes`：成功发送字节；`stages` 为 REF 次数，准备清屏也计算。
 - `timeouts/spi_errors/first_error/busy_ignored/ok`：失败与诊断状态。失败样本不纳入成功耗时均值。
-- 连续 mono 会话停止后的 POF 不属于上一帧；完整动画节奏还包含文件读取、app 调度和帧间配置。诊断JSON的串口输出也可能拉长帧间隔；不把开启日志后的节奏直接当作关闭日志时的极限。
+- 连续 mono 会话停止后的 POF 不属于上一帧；完整动画节奏还包含文件读取、app 调度和帧间配置。旧诊断版本的逐帧串口输出会拉长帧间隔；现在的 Mono 会话汇总避开播放期间输出，但仍不能用驱动耗时倒数代替实际帧率。
 
 命令返回 0 表示日志有效且样本成功；1 表示有失败样本或损坏记录（仍输出可用统计）；2 表示无法读取或没有完整记录。未开启诊断、只有空日志、只有半条 JSON 都不会被报告为成功实测。
 
@@ -37,3 +37,17 @@ node --test tools/ForFilm/tests/ark-open-image.test.cjs
 ```
 
 编码测试冻结7737671的真实旧函数，编译当前真实新函数，比较完整SPI字节流和prev状态。原子打开host检查编译实际app/manager/文件解析函数，验证目标首帧、普通恢复、列表去重与失败状态。固件能力和客户端约定见 [0x4B](../../docs/blecmd/blecmd_protocol.md#471-app_switch-0x4b---切换-app)；网页提供 `ArkDevice.openImage(filename)`。成功回包仅表示已提交，不等于屏幕完成；已开始的波形仍正常完成。
+
+## 低干扰 Mono 会话采样
+
+`CONFIG_ARK_EPD_PROFILE` 开启时，begin 幂等，不因每帧重入清空；end/sleep/deinit 收尾并清空。仅保留前 192 个稳态样本和最多 191 个起点间隔，正常构建无新增存储。退出只输出一条聚合，不转储逐帧大日志，避免阻塞取消及页面交接。
+
+- `sample_count/ok_samples` 是保留样本数及其中成功数；`dropped_samples` 是容量之外的调用数，不代表丢动画帧。
+- `error_samples/timeouts/spi_errors` 覆盖全会话，包括超过采样容量后的失败；因此 error_samples 可能大于 sample_count。失败不会被采样上限隐藏。
+- `total_sum_us`、`sum_us`、字节及事务 sum 只累计保留的成功样本；没有成功样本时不生成零耗时均值。
+- 起点间隔包括保留样本之间的真实调用间隔；任何失败都会使该轮验收失败。`interval_sum_us/interval_count` 给出平均间隔，`interval_p50_us` 给出中位数。平均调用率为 interval_count × 1000000 / interval_sum_us；中位数倒数另行标记，二者不混用。
+- CLI 同时兼容旧逐帧记录和新会话记录，JSON 的 groups 保留逐帧分组，sessions 单独列出会话结果。缺失或截断的会话记录不会被当作成功测量。
+
+本轮实机对照需先使用聚合采样、原刷新顺序建立基线，再与同样聚合采样的优化版比较。固定同一文件和播放参数；旧的逐帧打印结果只能作为历史参考。
+
+Windows + clang 的 `test_mono_profile.py` 检查真实 C 聚合器及会话生命周期，不连接设备。REF 尾部等待前移的候选已被实体显示测试否决，未保留在固件中。

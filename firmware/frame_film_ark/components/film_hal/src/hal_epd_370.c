@@ -42,6 +42,7 @@
 #ifdef CONFIG_ARK_EPD_PROFILE
 #include "esp_timer.h"
 #include <inttypes.h>
+#include <stdlib.h>
 #endif
 
 /*********************************************************************
@@ -638,6 +639,97 @@ static struct {
     bool first_prepare, mono_session, busy_ignored;
 } m_profile;
 
+/* PROFILE-only bounded statistics. Repeated begin calls do not reset them. */
+#define EPD_PROFILE_SESSION_LIMIT 192
+static struct {
+    uint32_t samples, successful, errors, dropped, timeouts, spi_errors;
+    int64_t first_started_us, last_started_us, total_sum, total_min, total_max;
+    int64_t phase_sum[EPD_PROFILE_STAGE_COUNT];
+    uint64_t bytes_sum, ram_bytes_sum, ram_transactions_sum, stages_sum;
+    uint32_t intervals[EPD_PROFILE_SESSION_LIMIT - 1], interval_count;
+} m_profile_session;
+
+static int epd_profile_interval_compare(const void *a, const void *b)
+{
+    const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void epd_profile_session_begin(void)
+{
+    memset(&m_profile_session, 0, sizeof(m_profile_session));
+}
+
+static void epd_profile_session_end(void)
+{
+    if (m_profile_session.samples || m_profile_session.dropped) {
+        const uint32_t n = m_profile_session.interval_count;
+        uint64_t interval_sum = 0;
+        for (uint32_t i = 0; i < n; i++) interval_sum += m_profile_session.intervals[i];
+        qsort(m_profile_session.intervals, n, sizeof(uint32_t), epd_profile_interval_compare);
+        const double median = n ? ((double)m_profile_session.intervals[(n - 1) / 2]
+                                  + m_profile_session.intervals[n / 2]) / 2 : 0;
+        ESP_LOGI(EPD_TAG, "EPD_PROFILE_SESSION {\"path\":\"mono\",\"scope\":\"mono_session\",\"unit\":\"us\","
+                 "\"sample_count\":%" PRIu32 ",\"ok_samples\":%" PRIu32 ",\"error_samples\":%" PRIu32 ",\"dropped_samples\":%" PRIu32 ","
+                 "\"first_started_us\":%" PRId64 ",\"last_started_us\":%" PRId64 ","
+                 "\"total_sum_us\":%" PRId64 ",\"total_min_us\":%" PRId64 ",\"total_max_us\":%" PRId64 ","
+                 "\"sum_us\":{\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
+                 "\"ref_us\":%" PRId64 ",\"pon_us\":%" PRId64 ",\"pof_us\":%" PRId64 ",\"other_us\":%" PRId64 "},"
+                 "\"bytes_sum\":%" PRIu64 ",\"ram_bytes_sum\":%" PRIu64 ",\"ram_transactions_sum\":%" PRIu64 ",\"stages_sum\":%" PRIu64 ","
+                 "\"interval_count\":%" PRIu32 ",\"interval_min_us\":%" PRIu32 ",\"interval_p50_us\":%.1f,"
+                 "\"interval_max_us\":%" PRIu32 ",\"interval_sum_us\":%" PRIu64 ","
+                 "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"ok\":%s}",
+                 m_profile_session.samples, m_profile_session.successful, m_profile_session.errors, m_profile_session.dropped,
+                 m_profile_session.first_started_us, m_profile_session.last_started_us,
+                 m_profile_session.total_sum, m_profile_session.total_min, m_profile_session.total_max,
+                 m_profile_session.phase_sum[EPD_PROFILE_INIT], m_profile_session.phase_sum[EPD_PROFILE_LUT],
+                 m_profile_session.phase_sum[EPD_PROFILE_RAM], m_profile_session.phase_sum[EPD_PROFILE_REF],
+                 m_profile_session.phase_sum[EPD_PROFILE_PON], m_profile_session.phase_sum[EPD_PROFILE_POF],
+                 m_profile_session.phase_sum[EPD_PROFILE_OTHER],
+                 m_profile_session.bytes_sum, m_profile_session.ram_bytes_sum,
+                 m_profile_session.ram_transactions_sum, m_profile_session.stages_sum,
+                 n, n ? m_profile_session.intervals[0] : 0, median,
+                 n ? m_profile_session.intervals[n - 1] : 0, interval_sum,
+                 m_profile_session.timeouts, m_profile_session.spi_errors,
+                 m_profile_session.errors ? "false" : "true");
+    }
+    epd_profile_session_begin();
+}
+
+static void epd_profile_session_add(int64_t total_us, int64_t other_us, bool ok)
+{
+    /* Errors cover all calls, even past capacity; sums cover retained good calls. */
+    m_profile_session.timeouts += m_profile.timeouts;
+    m_profile_session.spi_errors += m_profile.spi_errors;
+    if (!ok) m_profile_session.errors++;
+    if (m_profile_session.samples == EPD_PROFILE_SESSION_LIMIT) {
+        m_profile_session.dropped++;
+        return;
+    }
+    if (m_profile_session.samples) {
+        const int64_t elapsed = m_profile.started_us - m_profile_session.last_started_us;
+        m_profile_session.intervals[m_profile_session.interval_count++] =
+            elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+    } else {
+        m_profile_session.first_started_us = m_profile.started_us;
+    }
+    m_profile_session.last_started_us = m_profile.started_us;
+    m_profile_session.samples++;
+    if (!ok) return;
+    if (!m_profile_session.successful || total_us < m_profile_session.total_min)
+        m_profile_session.total_min = total_us;
+    if (total_us > m_profile_session.total_max) m_profile_session.total_max = total_us;
+    m_profile_session.successful++;
+    m_profile_session.total_sum += total_us;
+    for (int i = EPD_PROFILE_INIT; i < EPD_PROFILE_STAGE_COUNT; i++)
+        m_profile_session.phase_sum[i] += m_profile.stage_us[i];
+    m_profile_session.phase_sum[EPD_PROFILE_OTHER] += other_us;
+    m_profile_session.bytes_sum += m_profile.bytes;
+    m_profile_session.ram_bytes_sum += m_profile.ram_bytes;
+    m_profile_session.ram_transactions_sum += m_profile.ram_transactions;
+    m_profile_session.stages_sum += m_profile.stages;
+}
+
 static void epd_profile_begin(const char *path)
 {
     memset(&m_profile, 0, sizeof(m_profile));
@@ -693,6 +785,12 @@ static void epd_profile_end(void)
         other_us -= m_profile.stage_us[i];
     const bool ok = m_profile.first_error == ESP_OK && !m_profile.busy_ignored;
     m_profile.active = false;  /* Serial logging is outside the timed call. */
+    if (m_profile.mono_session && !strcmp(m_profile.path, "mono") &&
+        !m_profile.first_prepare && !m_profile.stage_us[EPD_PROFILE_INIT] &&
+        !m_profile.stage_us[EPD_PROFILE_PON]) {
+        epd_profile_session_add(total_us, other_us, ok);
+        return;
+    }
     ESP_LOGI(EPD_TAG, "EPD_PROFILE {\"path\":\"%s\",\"scope\":\"driver_call\",\"unit\":\"us\","
              "\"started_us\":%" PRId64 ",\"total_us\":%" PRId64 ","
              "\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
@@ -712,6 +810,8 @@ static void epd_profile_end(void)
              m_profile.busy_ignored ? "true" : "false", ok ? "true" : "false");
 }
 
+#define EPD_PROFILE_SESSION_BEGIN() epd_profile_session_begin()
+#define EPD_PROFILE_SESSION_END() epd_profile_session_end()
 #define EPD_PROFILE_BEGIN(path) epd_profile_begin(path)
 #define EPD_PROFILE_END() epd_profile_end()
 #define EPD_PROFILE_STAGE_BEGIN(name) \
@@ -724,6 +824,8 @@ static void epd_profile_end(void)
 #define EPD_PROFILE_PREPARE() do { if (m_profile.active) m_profile.first_prepare = true; } while (0)
 #define EPD_PROFILE_REF_COUNT() do { if (m_profile.active) m_profile.stages++; } while (0)
 #else
+#define EPD_PROFILE_SESSION_BEGIN() ((void)0)
+#define EPD_PROFILE_SESSION_END() ((void)0)
 #define EPD_PROFILE_BEGIN(path) ((void)0)
 #define EPD_PROFILE_END() ((void)0)
 #define EPD_PROFILE_STAGE_BEGIN(name) ((void)0)
@@ -1420,6 +1522,7 @@ void hal_epd_display_film(const unsigned char *filmData)
 
 void hal_epd_sleep(void)
 {
+    EPD_PROFILE_SESSION_END();
     /* 深睡之前先把面板 DC/DC 断掉：黑白快刷会话期间面板是保持上电的 */
     epd_spectra_power_off();
 
@@ -1435,6 +1538,7 @@ void hal_epd_sleep(void)
 
 void hal_epd_mono_session_begin(void)
 {
+    if (!m_mono_session) EPD_PROFILE_SESSION_BEGIN();
     m_mono_session = true;
 }
 
@@ -1445,6 +1549,7 @@ void hal_epd_mono_session_end(void)
     /* 结束"保持上电"的黑白快刷会话：把播放期间省下的那一趟 PON/POF 补上。
        已经在断电态时是空操作，可重复调用。 */
     epd_spectra_power_off();
+    EPD_PROFILE_SESSION_END();
 }
 
 void hal_epd_pwroff(void)
@@ -1457,6 +1562,7 @@ void hal_epd_pwroff(void)
 
 void hal_epd_deinit(void)
 {
+    EPD_PROFILE_SESSION_END();
     if (m_spi_device != NULL)
     {
         spi_bus_remove_device(m_spi_device);
