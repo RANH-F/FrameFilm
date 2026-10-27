@@ -134,7 +134,8 @@ var PANEL_CONFIGS = {
     0x02: { deviceType: 'FRAMEFILMPRO', pixelLayout: 'rotated-180' },  // 3.70" 720×480
     0x03: { deviceType: 'FRAMEFILM',    pixelLayout: 'rotated' },      // 3.60" 600×400
     0x05: { deviceType: 'FRAMEFILMMAX', pixelLayout: 'row-major' },    // 7.09" 1200×1600
-    0x06: { deviceType: 'FRAMEFILMDOCK', pixelLayout: 'row-major' }    // 3.64" 760×568（底座）
+    0x06: { deviceType: 'FRAMEFILMDOCK', pixelLayout: 'row-major' },   // 3.64" 760×568（底座）
+    0x07: { deviceType: 'FRAMEFILMPRO', pixelLayout: 'row-major' }     // 3.98" 768×552（SE0398）
 };
 
 // 根据设备回传的屏幕参数（面板 ID + 分辨率）更新机型、画布尺寸与像素排布
