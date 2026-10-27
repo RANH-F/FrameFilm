@@ -93,7 +93,10 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
 
   bool get arkConnected =>
       device.snapshot.connected &&
-      (device.snapshot.name?.toUpperCase().startsWith('FRAMEFILMARK') ?? false);
+      ((device.snapshot.advertisedName ?? device.snapshot.name)
+              ?.toUpperCase()
+              .startsWith('FRAMEFILMARK') ??
+          false);
   bool get ark => themePreferenceReady && arkThemeEnabled && arkConnected;
 
   Future<void> loadThemePreference() async {

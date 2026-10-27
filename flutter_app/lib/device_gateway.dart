@@ -174,6 +174,7 @@ class DeviceSnapshot {
     this.message = '尚未连接设备',
     this.devices = const [],
     this.name,
+    this.advertisedName,
     this.battery,
     this.width,
     this.height,
@@ -214,6 +215,7 @@ class DeviceSnapshot {
         );
       }).toList(),
       name: data['name'] as String?,
+      advertisedName: data['advertisedName'] as String?,
       battery: (data['battery'] as num?)?.toInt(),
       width: (data['width'] as num?)?.toInt(),
       height: (data['height'] as num?)?.toInt(),
@@ -255,6 +257,7 @@ class DeviceSnapshot {
   final String message;
   final List<DeviceInfo> devices;
   final String? name;
+  final String? advertisedName;
   final int? battery;
   final int? width;
   final int? height;
@@ -294,6 +297,11 @@ class DeviceSnapshot {
           ? files
           : previous.files,
       connected: keepConnected,
+      advertisedName: !keepConnected
+          ? null
+          : presentKeys.contains('advertisedName')
+          ? advertisedName
+          : advertisedName ?? previous.advertisedName,
       message: message,
       devices: devices,
       name: !keepConnected

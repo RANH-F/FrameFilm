@@ -64,6 +64,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private var connected = false
     private var message = "请扫描并连接 Ark"
     private var devices: List<Map<String, String>> = emptyList()
+    private var advertisedName: String? = null
     private var name: String? = null
     private var battery: Int? = null
     private var width: Int? = null
@@ -196,6 +197,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
             "storage" to storage, "canDelete" to canDeleteFiles,
             "entries" to deviceFiles.map { mapOf("id" to it.key, "name" to it.value) }),
         "connected" to connected, "message" to message, "devices" to devices,
+        "advertisedName" to if (connected) advertisedName else null,
         "name" to name, "battery" to battery, "width" to width, "height" to height,
         "autoSleep" to autoSleep, "timedWake" to timedWake, "wakeMinutes" to wakeMinutes,
         "syncedAt" to syncedAt, "settingsMessage" to settingsMessage, "settingsBusy" to refreshing,
@@ -414,8 +416,10 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "connect" -> {
                     val address = call.argument<String>("address")
                     require(!address.isNullOrBlank()) { "请选择 Ark 设备" }
-                    require(devices.any { it["address"] == address }) { "请先扫描并选择 Ark" }
+                    val selectedName = devices.firstOrNull { it["address"] == address }?.get("name")
+                    require(selectedName != null) { "请先扫描并选择 Ark" }
                     withPermissions(result) {
+                        advertisedName = selectedName
                         clearRead("cancelled", "已切换设备")
                         clearDetails()
                         connected = false

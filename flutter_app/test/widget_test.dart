@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:framefilm_ark/app.dart';
 import 'package:framefilm_ark/device_gateway.dart';
+import 'package:framefilm_ark/interface_theme_preferences.dart';
 
 class FakeGateway implements DeviceGateway {
   FakeGateway({this.supported = true});
@@ -21,6 +22,17 @@ class FakeGateway implements DeviceGateway {
   Future<void> invoke(String method, [Map<String, Object?>? arguments]) async {
     calls.add(method);
   }
+}
+
+class EnabledThemePreferences implements InterfaceThemePreferences {
+  EnabledThemePreferences([this.enabled = true]);
+  final bool enabled;
+
+  @override
+  Future<bool> load() async => enabled;
+
+  @override
+  Future<void> save(bool enabled) async {}
 }
 
 Future<void> openPage(WidgetTester tester, String title) async {
@@ -110,6 +122,95 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets('ota_reconnect_theme', (tester) async {
+    final gateway = FakeGateway();
+    addTearDown(gateway.events.close);
+    await tester.pumpWidget(
+      FrameFilmApp(
+        gateway: gateway,
+        themePreferences: EnabledThemePreferences(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Confirmation owns the transport, so the device-name refresh is deferred.
+    gateway.events.add(
+      DeviceSnapshot.fromMap({
+        'connected': true,
+        'advertisedName': 'FRAMEFILMARK-123',
+        'name': null,
+        'transfer': {'phase': 'confirming'},
+      }),
+    );
+    await tester.pump();
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!.brightness,
+      Brightness.dark,
+    );
+
+    // Partial transfer updates must not erase the advertised identity.
+    gateway.events.add(
+      DeviceSnapshot.fromMap({
+        'connected': true,
+        'transfer': {'phase': 'done', 'success': true},
+      }),
+    );
+    await tester.pump();
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!.brightness,
+      Brightness.dark,
+    );
+
+    gateway.events.add(DeviceSnapshot.fromMap({'connected': false}));
+    await tester.pump();
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!.brightness,
+      Brightness.light,
+    );
+
+    // A different advertised identity cannot inherit the previous Ark theme.
+    gateway.events.add(
+      DeviceSnapshot.fromMap({
+        'connected': true,
+        'advertisedName': 'FRAMEFILMSTD-456',
+        'name': 'FRAMEFILMARK-123',
+      }),
+    );
+    await tester.pump();
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!.brightness,
+      Brightness.light,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('ota_reconnect_respects_disabled_theme', (tester) async {
+    final gateway = FakeGateway();
+    addTearDown(gateway.events.close);
+    await tester.pumpWidget(
+      FrameFilmApp(
+        gateway: gateway,
+        themePreferences: EnabledThemePreferences(false),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    gateway.events.add(
+      DeviceSnapshot.fromMap({
+        'connected': true,
+        'advertisedName': 'FRAMEFILMARK-123',
+        'name': null,
+        'transfer': {'phase': 'confirming'},
+      }),
+    );
+    await tester.pump();
+    expect(
+      tester.widget<MaterialApp>(find.byType(MaterialApp)).theme!.brightness,
+      Brightness.light,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets('explicit ForFilm choice survives Ark connection', (
     tester,
