@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'device_gateway.dart';
 
-/// Manages the device's active file directory through the existing BLE protocol.
+/// Browses an independent, read-only SD catalog.
 class DeviceFilesPage extends StatelessWidget {
   const DeviceFilesPage({super.key, required this.controller});
   final DeviceController controller;
@@ -88,7 +88,7 @@ class DeviceFilesPage extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           const Text(
-            '目录切换会切换设备上的图片或动画 app。空目录或未注册的 app 可能无法进入；可刷新设备当前目录。协议不提供任意路径浏览。',
+            '浏览图片或动画目录只读取 SD 卡，不切换 app，也不刷新设备画面。点击“显示”才会切换到对应 app。删除需设备当前已打开对应 app。旧固件需升级后使用只读浏览。',
           ),
           if (snapshot.connected && !knownDirectory)
             const Padding(
@@ -171,7 +171,7 @@ class DeviceFilesPage extends StatelessWidget {
                           label: const Text('显示'),
                         ),
                         TextButton.icon(
-                          onPressed: available
+                          onPressed: available && files['canDelete'] == true
                               ? () => _delete(context, entry)
                               : null,
                           icon: const Icon(Icons.delete_outline),
@@ -184,9 +184,98 @@ class DeviceFilesPage extends StatelessWidget {
               ),
             ),
           const SizedBox(height: 12),
-          const Text('显示状态来自设备文件 ID 回读，不代表电子纸已完成刷新。删除后重新读取列表，文件 ID 可能改变。'),
+          const Text('目录为读取时的快照。显示命令完成不代表电子纸已完成刷新；删除前会按文件名重新核对设备活跃列表。'),
         ],
       );
+    },
+  );
+}
+
+/// Actual SD statistics, with unknown and partial reads kept distinct from zero.
+class DeviceStorageSummary extends StatelessWidget {
+  const DeviceStorageSummary({
+    super.key,
+    required this.controller,
+    this.onBrowseDirectory,
+    this.embedded = false,
+  });
+  final DeviceController controller;
+  final ValueChanged<int>? onBrowseDirectory;
+  final bool embedded;
+
+  static String _bytes(Object? value) {
+    if (value is! num) return '未读取';
+    if (value >= 1024 * 1024 * 1024)
+      return '${(value / (1024 * 1024 * 1024)).toStringAsFixed(2)} GiB';
+    return '${(value / (1024 * 1024)).toStringAsFixed(1)} MiB';
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) {
+      final raw = controller.snapshot.files['storage'];
+      final storage = raw is Map ? raw : const {};
+      final phase = storage['phase'];
+      String count(String key) =>
+          storage[key] is num ? '${storage[key]} 个' : '未读取';
+      final available = controller.canEditSettings;
+      final content = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.sd_storage_outlined),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('设备 SD 卡')),
+              IconButton(
+                tooltip: '刷新 SD 卡统计',
+                onPressed: available
+                    ? () => controller.command('refreshDeviceStorage')
+                    : null,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+          Text(
+            '总容量 ${_bytes(storage['totalBytes'])} · 剩余 ${_bytes(storage['freeBytes'])}',
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: available && onBrowseDirectory != null
+                    ? () => onBrowseDirectory!(0)
+                    : null,
+                icon: const Icon(Icons.image_outlined),
+                label: Text('图片 ${count('filmCount')} · 查看'),
+              ),
+              TextButton.icon(
+                onPressed: available && onBrowseDirectory != null
+                    ? () => onBrowseDirectory!(3)
+                    : null,
+                icon: const Icon(Icons.animation),
+                label: Text('动画 ${count('animationCount')} · 查看'),
+              ),
+            ],
+          ),
+          if (phase == 'loading') const LinearProgressIndicator(),
+          Text(
+            storage['message'] as String? ??
+                (controller.snapshot.connected
+                    ? '尚未读取 SD 卡统计'
+                    : '连接设备后读取 SD 卡统计'),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      );
+      return embedded
+          ? content
+          : Card(
+              child: Padding(padding: const EdgeInsets.all(16), child: content),
+            );
     },
   );
 }

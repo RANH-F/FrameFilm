@@ -6,10 +6,48 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import 'frame_codec.dart';
+import 'live_image_composition.dart';
 import 'workbench_widgets.dart';
 import 'frame_quick_page.dart';
 import 'frame_io.dart' as io;
 import 'passport_storage.dart' as storage;
+
+class _EditorScaleRecognizer extends ScaleGestureRecognizer {
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    resolve(GestureDisposition.accepted);
+  }
+}
+
+class _EditorGestures extends StatelessWidget {
+  const _EditorGestures({
+    super.key,
+    required this.child,
+    this.onScaleStart,
+    this.onScaleUpdate,
+  });
+  final Widget child;
+  final GestureScaleStartCallback? onScaleStart;
+  final GestureScaleUpdateCallback? onScaleUpdate;
+  @override
+  Widget build(BuildContext context) => RawGestureDetector(
+    behavior: HitTestBehavior.opaque,
+    gestures: onScaleStart == null
+        ? const {}
+        : {
+            _EditorScaleRecognizer:
+                GestureRecognizerFactoryWithHandlers<_EditorScaleRecognizer>(
+                  () => _EditorScaleRecognizer(),
+                  (r) {
+                    r.onStart = onScaleStart;
+                    r.onUpdate = onScaleUpdate;
+                  },
+                ),
+          },
+    child: child,
+  );
+}
 
 class FrameEditorController {
   Uint8List? source, crop;
@@ -82,7 +120,8 @@ class _FrameEditorState extends State<FrameEditor> {
   Offset _gesturePan = Offset.zero, _gestureStart = Offset.zero;
   String _status = '';
   Timer? _previewTimer;
-  bool get locked => _working || _sending || _exporting;
+  bool get locked => _sending || _exporting;
+  bool _converting = false, _previewRequested = false;
   @override
   void initState() {
     super.initState();
@@ -92,6 +131,7 @@ class _FrameEditorState extends State<FrameEditor> {
   @override
   void dispose() {
     _generation++;
+    _previewRequested = false;
     _previewTimer?.cancel();
     // A device transfer belongs to the application, and can be cancelled in Film's status card.
     super.dispose();
@@ -99,6 +139,8 @@ class _FrameEditorState extends State<FrameEditor> {
 
   void _cancel() {
     _generation++;
+    _previewRequested = false;
+    _previewTimer?.cancel();
     setState(() {
       _working = false;
       _status = '已取消，可重新生成';
@@ -107,6 +149,7 @@ class _FrameEditorState extends State<FrameEditor> {
 
   Future<void> _pick() async {
     _previewTimer?.cancel();
+    _previewRequested = false;
     final generation = ++_generation;
     setState(() {
       _working = true;
@@ -133,10 +176,15 @@ class _FrameEditorState extends State<FrameEditor> {
         return;
       }
       final decoder = await ui.instantiateImageCodec(bytes);
-      final image = (await decoder.getNextFrame()).image;
-      final landscape = image.width > image.height;
-      image.dispose();
-      decoder.dispose();
+      late bool landscape;
+      ui.Image? image;
+      try {
+        image = (await decoder.getNextFrame()).image;
+        landscape = image.width > image.height;
+      } finally {
+        image?.dispose();
+        decoder.dispose();
+      }
       if (!mounted || generation != _generation) return;
       final previous = c.options;
       final options = FrameOptions(
@@ -189,7 +237,6 @@ class _FrameEditorState extends State<FrameEditor> {
     bool? dither,
   }) {
     final o = c.options;
-    _generation++;
     setState(() {
       c.options = FrameOptions(
         format: algorithm != null ? FrameFormat.sixColor : (format ?? o.format),
@@ -208,21 +255,27 @@ class _FrameEditorState extends State<FrameEditor> {
         ditherStrength: strength ?? o.ditherStrength,
       );
       c.revision++;
-      c.crop = null;
-      _working = false;
+
       _status = c.source == null ? '参数已更新，请上传图像以生成预览' : '参数已更新，正在更新预览';
     });
-    _previewTimer?.cancel();
-    if (c.source != null) {
-      _previewTimer = Timer(const Duration(milliseconds: 180), _generate);
+    _previewRequested = c.source != null;
+    if (c.source != null &&
+        !_converting &&
+        !(_previewTimer?.isActive ?? false)) {
+      _previewTimer = Timer(const Duration(milliseconds: 80), _generate);
     }
   }
 
   Future<void> _generate() async {
-    final source = c.source;
-    if (source == null) return;
+    if (!mounted || c.source == null) return;
+    _previewRequested = true;
+    if (_converting) return;
+    final source = c.source!;
+    _previewRequested = false;
+    _converting = true;
     _previewTimer?.cancel();
-    final generation = ++_generation, revision = c.revision;
+    final generation = _generation, revision = c.revision;
+    final options = c.options;
     setState(() {
       _working = true;
       _progress = 0;
@@ -230,20 +283,16 @@ class _FrameEditorState extends State<FrameEditor> {
     });
     bool cancelled() => !mounted || generation != _generation;
     try {
-      final crop = await prepareFrame(
-        source,
-        c.options,
-        isCancelled: cancelled,
-      );
+      final crop = await prepareFrame(source, options, isCancelled: cancelled);
       final result = await convertFrame(
         source,
-        c.options,
+        options,
         isCancelled: cancelled,
         onProgress: (v) {
           if (!cancelled()) setState(() => _progress = v);
         },
       );
-      if (cancelled()) return;
+      if (cancelled() || revision != c.revision) return;
       setState(() {
         c.crop = crop;
         c.result = result;
@@ -257,6 +306,14 @@ class _FrameEditorState extends State<FrameEditor> {
           _working = false;
           _status = '生成失败：$e';
         });
+      }
+    } finally {
+      _converting = false;
+      if (mounted &&
+          c.source != null &&
+          (_previewRequested ||
+              (generation == _generation && revision != c.revision))) {
+        _previewTimer = Timer(const Duration(milliseconds: 80), _generate);
       }
     }
   }
@@ -343,9 +400,7 @@ class _FrameEditorState extends State<FrameEditor> {
         o.algorithm == FrameAlgorithm.colorQual ||
         o.algorithm == FrameAlgorithm.colorQualMeasured ||
         o.algorithm == FrameAlgorithm.colorQualCalibrated;
-    final png = devicePreview
-        ? (c.hasCurrentResult ? c.result!.png : null)
-        : c.crop;
+    final png = devicePreview ? c.result?.png : c.crop;
     final sections = <Widget>[
       _section('上传与算法', [
         Wrap(
@@ -353,7 +408,7 @@ class _FrameEditorState extends State<FrameEditor> {
           runSpacing: 8,
           children: [
             FilledButton.icon(
-              onPressed: locked ? null : _pick,
+              onPressed: locked || _working ? null : _pick,
               icon: const Icon(Icons.add_photo_alternate_outlined),
               label: const Text('上传图像'),
             ),
@@ -413,6 +468,7 @@ class _FrameEditorState extends State<FrameEditor> {
                   ? null
                   : () {
                       _generation++;
+                      _previewRequested = false;
                       _previewTimer?.cancel();
                       setState(() {
                         c.clear();
@@ -429,7 +485,7 @@ class _FrameEditorState extends State<FrameEditor> {
             ),
           ],
         ),
-        const Text('关闭抖动时可拖动、双指或滚轮缩放；开启后预览设备色彩。'),
+        const Text('可拖动、双指或滚轮缩放；构图实时更新，设备色彩随后更新。'),
         ExpansionTile(
           title: const Text('扩展选项'),
           tilePadding: EdgeInsets.zero,
@@ -477,57 +533,96 @@ class _FrameEditorState extends State<FrameEditor> {
             constraints: const BoxConstraints(maxWidth: 480),
             child: LayoutBuilder(
               builder: (context, constraints) => Listener(
+                key: const ValueKey('film-preview-events'),
                 onPointerSignal: (event) {
                   if (event is PointerScrollEvent &&
-                      !o.dither &&
                       !_sending &&
                       !_exporting &&
                       c.source != null) {
-                    _change(
-                      zoom: (o.zoom * (event.scrollDelta.dy > 0 ? .9 : 1.1))
-                          .clamp(.05, 10),
+                    GestureBinding.instance.pointerSignalResolver.register(
+                      event,
+                      (signal) {
+                        if (!mounted || locked || c.source == null) return;
+                        final current = c.options;
+                        final zoom =
+                            (current.zoom *
+                                    (event.scrollDelta.dy > 0 ? .9 : 1.1))
+                                .clamp(.05, 10)
+                                .toDouble();
+                        final focal =
+                            event.localPosition * (480 / constraints.maxWidth);
+                        final center =
+                            const Offset(240, 360) +
+                            Offset(current.panX, current.panY);
+                        final nextCenter =
+                            focal - (focal - center) * (zoom / current.zoom);
+                        _change(
+                          zoom: zoom,
+                          x: nextCenter.dx - 240,
+                          y: nextCenter.dy - 360,
+                        );
+                      },
                     );
                   }
                 },
-                child: GestureDetector(
-                  onScaleStart:
-                      o.dither || _sending || _exporting || c.source == null
+                child: _EditorGestures(
+                  key: const ValueKey('film-gestures'),
+                  onScaleStart: _sending || _exporting || c.source == null
                       ? null
                       : (d) {
                           _gestureZoom = o.zoom;
                           _gesturePan = Offset(o.panX, o.panY);
                           _gestureStart = d.localFocalPoint;
                         },
-                  onScaleUpdate:
-                      o.dither || _sending || _exporting || c.source == null
+                  onScaleUpdate: _sending || _exporting || c.source == null
                       ? null
                       : (d) {
-                          final delta =
-                              (d.localFocalPoint - _gestureStart) *
-                              (480 / constraints.maxWidth);
+                          final screenToOutput = 480 / constraints.maxWidth;
+                          final start = _gestureStart * screenToOutput;
+                          final focal = d.localFocalPoint * screenToOutput;
+                          final zoom = (_gestureZoom * d.scale)
+                              .clamp(.05, 10)
+                              .toDouble();
+                          final originalCenter =
+                              const Offset(240, 360) + _gesturePan;
+                          final nextCenter =
+                              focal -
+                              (start - originalCenter) * (zoom / _gestureZoom);
                           _change(
-                            zoom: (_gestureZoom * d.scale).clamp(.05, 10),
-                            x: _gesturePan.dx + delta.dx,
-                            y: _gesturePan.dy + delta.dy,
+                            zoom: zoom,
+                            x: nextCenter.dx - 240,
+                            y: nextCenter.dy - 360,
                           );
                         },
                   child: AspectRatio(
                     aspectRatio: 2 / 3,
                     child: ColoredBox(
                       color: Colors.white,
-                      child: png == null
+                      child: c.source == null
                           ? const Center(
                               child: Icon(
                                 Icons.image_outlined,
                                 color: Colors.black38,
                               ),
                             )
-                          : Image.memory(
-                              png,
-                              fit: BoxFit.contain,
-                              gaplessPlayback: true,
-                              errorBuilder: (_, e, s) =>
-                                  const Center(child: Text('预览不可用')),
+                          : Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                // Keep the decoded source alive between completed conversions.
+                                LiveImageComposition(
+                                  key: const ValueKey('film-live-composition'),
+                                  source: c.source!,
+                                  options: o,
+                                ),
+                                if (c.hasCurrentResult && png != null)
+                                  Image.memory(
+                                    png,
+                                    fit: BoxFit.contain,
+                                    gaplessPlayback: true,
+                                    errorBuilder: (_, e, s) =>
+                                        const Center(child: Text('预览不可用')),
+                                  ),
+                              ],
                             ),
                     ),
                   ),
@@ -537,7 +632,13 @@ class _FrameEditorState extends State<FrameEditor> {
           ),
         ),
         const SizedBox(height: 8),
-        Text(devicePreview ? '设备色彩预览' : '原色构图预览 · 下载和发送会转换为设备色彩'),
+        Text(
+          !c.hasCurrentResult && c.source != null
+              ? '实时构图预览 · 正在转换设备色彩'
+              : devicePreview
+              ? '设备色彩预览'
+              : '原色构图预览 · 下载和发送会转换为设备色彩',
+        ),
       ]),
       const SizedBox(height: 16),
       _section('输出', [

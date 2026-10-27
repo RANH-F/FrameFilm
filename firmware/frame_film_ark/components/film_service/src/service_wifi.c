@@ -36,6 +36,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_timer.h"
 #include "freertos/portmacro.h"
 
 #include "esp_http_client.h"
@@ -417,6 +419,134 @@ static bool wifi_direct_wait_connected(uint32_t timeout_ms, bool allow_cancel)
     return true;
 }
 
+/* Bounded receive window: file_task remains the only SD writer. */
+#define WIFI_DIRECT_SLOT_COUNT 3
+#define WIFI_DIRECT_SLOT_SIZE (16 * 1024)
+typedef struct {
+    QueueHandle_t completed;
+    uint8_t *data;
+    uint32_t len;
+    bool busy;
+    int result;
+    int64_t write_us;
+} wifi_direct_slot_t;
+
+static void wifi_direct_write_done(void *context, int result, int64_t write_us)
+{
+    wifi_direct_slot_t *slot = context;
+    slot->result = result;
+    slot->write_us = write_us;
+    /* At most SLOT_COUNT outstanding slots, each returned exactly once. */
+    BaseType_t queued = xQueueSend(slot->completed, &slot, 0);
+    configASSERT(queued == pdPASS);
+}
+
+static bool wifi_direct_reap(QueueHandle_t completed, TickType_t wait,
+                             unsigned *pending, uint32_t *saved, int64_t *write_us,
+                             uint8_t *error, uint32_t total)
+{
+    wifi_direct_slot_t *slot;
+    if(xQueueReceive(completed, &slot, wait) != pdPASS) return false;
+    --*pending;
+    slot->busy = false;
+    *write_us += slot->write_us;
+    if(slot->result != 0) *error = WIFI_DIRECT_ERR_SAVE;
+    else {
+        *saved += slot->len;
+        wifi_direct_status(WIFI_DIRECT_DOWNLOADING, 0, *saved, total);
+    }
+    return true;
+}
+
+/* All borrowed slots are reaped on every exit, before the caller aborts/commits. */
+static uint8_t wifi_direct_receive(esp_http_client_handle_t client, uint32_t total,
+                                   uint32_t *saved_out)
+{
+    uint8_t error = WIFI_DIRECT_ERR_NONE;
+    uint32_t network_bytes = 0, saved = 0;
+    unsigned pending = 0, reads = 0, blocks = 0;
+    /* These are overlapping stage times, not additive wall-clock components. */
+    int64_t read_us = 0, wait_us = 0, write_us = 0;
+    int64_t started = esp_timer_get_time();
+    uint8_t *pool = heap_caps_malloc(WIFI_DIRECT_SLOT_COUNT * WIFI_DIRECT_SLOT_SIZE,
+                                     MALLOC_CAP_SPIRAM);
+    QueueHandle_t completed = xQueueCreate(WIFI_DIRECT_SLOT_COUNT, sizeof(wifi_direct_slot_t *));
+    if(!pool || !completed) {
+        if(pool) heap_caps_free(pool);
+        if(completed) vQueueDelete(completed);
+        return WIFI_DIRECT_ERR_RESOURCE;
+    }
+    wifi_direct_slot_t slots[WIFI_DIRECT_SLOT_COUNT] = {0};
+    for(unsigned i = 0; i < WIFI_DIRECT_SLOT_COUNT; ++i) {
+        slots[i].data = pool + i * WIFI_DIRECT_SLOT_SIZE;
+        slots[i].completed = completed;
+    }
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
+    while(network_bytes < total && !error) {
+        while(wifi_direct_reap(completed, 0, &pending, &saved, &write_us, &error, total)) {}
+        if(error) break;
+        if(wifi_direct_cancelled()) { error = WIFI_DIRECT_ERR_CANCELLED; break; }
+        wifi_direct_slot_t *slot = NULL;
+        for(unsigned i = 0; i < WIFI_DIRECT_SLOT_COUNT; ++i)
+            if(!slots[i].busy) { slot = &slots[i]; break; }
+        if(!slot) {
+            int64_t before = esp_timer_get_time();
+            wifi_direct_reap(completed, pdMS_TO_TICKS(100), &pending, &saved,
+                             &write_us, &error, total);
+            wait_us += esp_timer_get_time() - before;
+            continue;
+        }
+        uint32_t want = total - network_bytes;
+        if(want > WIFI_DIRECT_SLOT_SIZE) want = WIFI_DIRECT_SLOT_SIZE;
+        slot->len = 0;
+        while(slot->len < want) {
+            if(wifi_direct_cancelled()) { error = WIFI_DIRECT_ERR_CANCELLED; break; }
+            if((int32_t)(xTaskGetTickCount() - deadline) >= 0) {
+                error = WIFI_DIRECT_ERR_HTTP; break;
+            }
+            int64_t before = esp_timer_get_time();
+            int got = esp_http_client_read(client, (char *)slot->data + slot->len,
+                                           (int)(want - slot->len));
+            read_us += esp_timer_get_time() - before;
+            ++reads;
+            if(got <= 0) { error = WIFI_DIRECT_ERR_HTTP; break; }
+            slot->len += (uint32_t)got;
+            network_bytes += (uint32_t)got;
+            deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
+        }
+        if(error) break;
+        slot->busy = true;
+        int64_t before = esp_timer_get_time();
+        int result = service_file_save_data_async(FILE_SAVE_WIFI, slot->data, slot->len,
+                                                  wifi_direct_write_done, slot);
+        wait_us += esp_timer_get_time() - before;
+        if(result != 0) {
+            slot->busy = false;
+            error = WIFI_DIRECT_ERR_SAVE;
+            break;
+        }
+        ++pending;
+        ++blocks;
+    }
+    /* Never free/reuse a buffer or abort its file while file_task borrows it. */
+    while(pending) {
+        int64_t before = esp_timer_get_time();
+        wifi_direct_reap(completed, portMAX_DELAY, &pending, &saved, &write_us, &error, total);
+        wait_us += esp_timer_get_time() - before;
+    }
+    if(wifi_direct_cancelled()) error = WIFI_DIRECT_ERR_CANCELLED;
+    if(!error && (network_bytes != total || saved != total)) error = WIFI_DIRECT_ERR_HTTP;
+    *saved_out = saved;
+    sys_logi(WIFI_SERVICE_TAG, "HTTP pipeline: net=%" PRIu32 " saved=%" PRIu32
+             " reads=%u blocks=%u read_us=%" PRId64 " queue_wait_us=%" PRId64
+             " write_us=%" PRId64 " elapsed_us=%" PRId64,
+             network_bytes, saved, reads, blocks, read_us, wait_us, write_us,
+             esp_timer_get_time() - started);
+    vQueueDelete(completed);
+    heap_caps_free(pool);
+    return error;
+}
+
 static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *received_out, uint32_t *total_out)
 {
     const char *url = args->url;
@@ -427,9 +557,6 @@ static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *re
     uint8_t error = WIFI_DIRECT_ERR_HTTP;
     bool saving = false;
     uint32_t received = 0, total = 0;
-    uint8_t header[32];
-    size_t header_len = 0;
-    unsigned chunk_index = 0;
     do {
         if(esp_http_client_open(client, 0) != ESP_OK) break;
         int64_t length = esp_http_client_fetch_headers(client);
@@ -473,59 +600,14 @@ static uint8_t wifi_direct_download(const wifi_direct_args_t *args, uint32_t *re
             }
         }
         saving = true;
-        uint32_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(120000);
-        while(received < total)
-        {
-            if(wifi_direct_cancelled()) { error = WIFI_DIRECT_ERR_CANCELLED; break; }
-            if((int32_t)(xTaskGetTickCount() - deadline) >= 0) break;
-            size_t want = total - received;
-            if(want > 4096) want = 4096;
-            /* FatFS can pass full sectors directly to SDMMC. Use PSRAM so
-             * ESP32-S3 SDMMC uses its sector-sized DMA bounce buffer. This
-             * avoids RTC FAST DMA corruption without reserving 4 KiB of DRAM. */
-            uint8_t *chunk = heap_caps_malloc(want, MALLOC_CAP_SPIRAM);
-            if(!chunk) { error = WIFI_DIRECT_ERR_RESOURCE; break; }
-            int got = esp_http_client_read(client, (char *)chunk, (int)want);
-            if(got <= 0) { vPortFree(chunk); break; }
-            if(chunk_index < 3)
-            {
-                sys_logd(WIFI_SERVICE_TAG, "HTTP chunk trace: index=%u want=%u got=%d buffer=%p dma=%d aligned4=%d",
-                         chunk_index, (unsigned)want, got, (void *)chunk,
-                         esp_ptr_dma_capable(chunk), ((uintptr_t)chunk & 3u) == 0);
-            }
-            ++chunk_index;
-            if(!args->file && header_len < sizeof(header))
-            {
-                size_t take = sizeof(header) - header_len;
-                if(take > (size_t)got) take = (size_t)got;
-                memcpy(header + header_len, chunk, take);
-                header_len += take;
-                if(header_len == sizeof(header))
-                {
-                    char hex[sizeof(header) * 2 + 1];
-                    static const char digits[] = "0123456789ABCDEF";
-                    for(size_t i = 0; i < header_len; ++i)
-                    {
-                        hex[i * 2] = digits[header[i] >> 4];
-                        hex[i * 2 + 1] = digits[header[i] & 15];
-                    }
-                    hex[header_len * 2] = '\0';
-                    sys_logd(WIFI_SERVICE_TAG, "Film header trace stage=http owner=%u bytes=%u hex=%s",
-                             (unsigned)FILE_SAVE_WIFI, (unsigned)header_len, hex);
-                }
-            }
-            if(service_file_save_data(FILE_SAVE_WIFI, chunk, (uint32_t)got) != 0)
-            {
-                error = WIFI_DIRECT_ERR_SAVE;
-                break;
-            }
-            received += (uint32_t)got;
-            *received_out = received;
-            wifi_direct_status(WIFI_DIRECT_DOWNLOADING, 0, received, total);
-        }
-        if(wifi_direct_cancelled()) error = WIFI_DIRECT_ERR_CANCELLED;
-        if(error == WIFI_DIRECT_ERR_CANCELLED || received != total) break;
-        if(service_file_save_stop(FILE_SAVE_WIFI, args->file ? 0 : 1) != 0)
+        error = wifi_direct_receive(client, total, &received);
+        *received_out = received;
+        if(error) break;
+        int64_t commit_start = esp_timer_get_time();
+        int commit_result = service_file_save_stop(FILE_SAVE_WIFI, args->file ? 0 : 1);
+        sys_logi(WIFI_SERVICE_TAG, "HTTP final commit_us=%" PRId64 " result=%d",
+                 esp_timer_get_time() - commit_start, commit_result);
+        if(commit_result != 0)
         {
             error = WIFI_DIRECT_ERR_SAVE;
             break;
@@ -625,6 +707,8 @@ static void wifi_direct_task(void *arg)
     bool wifi_touched = false;
     wifi_config_t old_config = {0};
     bool have_config = false;
+    wifi_ps_type_t old_ps = WIFI_PS_NONE;
+    bool have_ps = false;
 
     /* A heartbeat may already be in its HTTP request. Let it finish before changing STA. */
     uint32_t wait_start = xTaskGetTickCount();
@@ -650,6 +734,14 @@ static void wifi_direct_task(void *arg)
     }
     if(!error && (was_initialized ? hal_wifi_set_ram_storage(true) : hal_wifi_init(true)) != ESP_OK)
         error = WIFI_DIRECT_ERR_RESOURCE;
+    if(!error)
+    {
+        esp_err_t ps_err = hal_wifi_get_power_save(&old_ps);
+        have_ps = ps_err == ESP_OK;
+        if(have_ps) ps_err = hal_wifi_set_power_save(WIFI_PS_NONE);
+        if(ps_err != ESP_OK)
+            sys_logw(WIFI_SERVICE_TAG, "Direct power-save boost unavailable: %s", esp_err_to_name(ps_err));
+    }
     if(!error && hal_wifi_connect(args->ssid, args->password) != ESP_OK)
         error = WIFI_DIRECT_ERR_CONNECT;
     if(!error && !wifi_direct_wait_connected(25000, true))
@@ -658,6 +750,8 @@ static void wifi_direct_task(void *arg)
                                 wifi_direct_download(args, &received, &total);
 
     wifi_direct_status(WIFI_DIRECT_RESTORING, error, received, total);
+    if(have_ps && hal_wifi_set_power_save(old_ps) != ESP_OK)
+        error = WIFI_DIRECT_ERR_RESTORE;
     if(wifi_touched && was_initialized)
     {
         hal_wifi_disconnect();

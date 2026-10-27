@@ -11,6 +11,7 @@ import kotlin.math.max
 
 /** Native 6-color v1 encoder. Header and Ark 180-degree packing match ForFilm. */
 object FilmConverter {
+    const val MAX_FILM_BYTES = 128 * 1024 * 1024
     const val WIDTH = 720
     const val HEIGHT = 480
     data class Output(val preview: Bitmap, val bytes: ByteArray)
@@ -86,7 +87,7 @@ object FilmConverter {
     }
 
     fun validate(file: File): String {
-        require(file.length() in 32..32L * 1024 * 1024) { "film 文件大小无效" }
+        require(file.length() in 32..MAX_FILM_BYTES.toLong()) { "film 文件大小无效" }
         val header = ByteArray(32)
         file.inputStream().use { require(it.read(header) == 32) { "film 文件头不完整" } }
         val buffer = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)

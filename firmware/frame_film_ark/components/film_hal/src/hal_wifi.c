@@ -76,6 +76,17 @@ esp_err_t hal_wifi_set_ram_storage(bool ram_storage)
                          : ESP_ERR_INVALID_STATE;
 }
 
+esp_err_t hal_wifi_get_power_save(wifi_ps_type_t *type)
+{
+    if(!s_initialized || !type) return ESP_ERR_INVALID_STATE;
+    return esp_wifi_get_ps(type);
+}
+
+esp_err_t hal_wifi_set_power_save(wifi_ps_type_t type)
+{
+    return s_initialized ? esp_wifi_set_ps(type) : ESP_ERR_INVALID_STATE;
+}
+
 esp_err_t hal_wifi_get_sta_config(wifi_config_t *config)
 {
     return s_initialized ? esp_wifi_get_config(WIFI_IF_STA, config) : ESP_ERR_INVALID_STATE;

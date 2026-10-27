@@ -1,6 +1,10 @@
 #ifndef __HAL_SD_H__
 #define __HAL_SD_H__
 
+#include <stdint.h>
+
+
+
 
 /*********************************************************************
  * INCLUDES
@@ -84,6 +88,9 @@ extern void hal_sd_deinit(void);
  * @return int 0:成功, -1:失败
  */
 extern int hal_sd_format(void);
+
+/** Mounted FAT filesystem capacity/free bytes; returns -1 when unavailable. */
+extern int hal_sd_get_space(uint64_t *total, uint64_t *free_bytes);
 
 #ifdef __cplusplus
 }

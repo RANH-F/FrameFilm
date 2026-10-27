@@ -36,6 +36,18 @@
 
 #include "sys_log.h"
 #include <stdint.h>
+#include "sdkconfig.h"
+#include "esp_attr.h"
+
+#ifdef CONFIG_ARK_EPD_PROFILE
+#include "esp_timer.h"
+#include <inttypes.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
+#include "esp_intr_alloc.h"
+#endif
 
 /*********************************************************************
  * MACROS
@@ -57,6 +69,7 @@
 #define JD7601_CMD_UNK_E6            0xE6  // 初始化命令（语义待确认）
 
 #define EPD_INPUT_LINE                (EPD_WIDTH / 2)  // 每行字节数（4bpp，720/2=360）
+#define EPD_MONO_BATCH_LINES          (4)  // Matches the SPI bus transfer capacity
 #define EPD_MONO_LINE                 (EPD_WIDTH / 8)  // 每行字节数（1bpp，720/8=90）
 #define EPD_MONO_BYTES                (EPD_WIDTH * EPD_HEIGHT / 8)  // 43200
 
@@ -609,6 +622,530 @@ static uint8_t m_mono_prev[EPD_MONO_BYTES];  // 黑白快刷上一帧（bit-reve
 static bool m_panel_powered = false;         // 面板 DC/DC 是否上电（PON 后、POF 前）；硬复位/深睡会清掉
 static bool m_mono_session = false;          // 黑白快刷会话：打开时帧间保持上电（见 hal_epd_mono_session_begin）
 
+/* Profiling owns only the two public mono/8bpp driver calls below. The existing
+ * driver is serialized by its callers; internal helpers must not start a frame.
+ * Stages are exclusive, including preparation passes, and retain original delays.
+ * This measures driver calls, not decoding/UI/queue time or end-to-end FPS. */
+#ifdef CONFIG_ARK_EPD_PROFILE
+typedef enum {
+    EPD_PROFILE_OTHER, EPD_PROFILE_INIT, EPD_PROFILE_LUT, EPD_PROFILE_RAM,
+    EPD_PROFILE_REF, EPD_PROFILE_PON, EPD_PROFILE_POF, EPD_PROFILE_STAGE_COUNT
+} epd_profile_stage_t;
+
+static struct {
+    bool active;
+    const char *path;
+    int64_t started_us;
+    int64_t stage_us[EPD_PROFILE_STAGE_COUNT];
+    epd_profile_stage_t stage;
+    uint32_t bytes, lut_bytes, ram_bytes, ram_transactions, stages, timeouts, spi_errors;
+    uint32_t call_id;
+    esp_err_t first_error;
+    bool first_prepare, mono_session, busy_ignored;
+} m_profile;
+
+/* PROFILE-only bounded statistics. Repeated begin calls do not reset them. */
+#define EPD_PROFILE_SESSION_LIMIT 192
+static struct {
+    uint32_t samples, successful, errors, dropped, timeouts, spi_errors;
+    int64_t first_started_us, last_started_us, total_sum, total_min, total_max;
+    int64_t phase_sum[EPD_PROFILE_STAGE_COUNT];
+    uint64_t bytes_sum, ram_bytes_sum, ram_transactions_sum, stages_sum;
+    uint32_t intervals[EPD_PROFILE_SESSION_LIMIT - 1], interval_count;
+} m_profile_session;
+
+/* PROFILE-only observation. Call ids count Mono driver calls in this session,
+ * not film indexes. Markers: 0=edge,1=begin,2=DTM1 before,3=DTM1 after,
+ * 4=RAM done,5=REF before,6=REF+00 after,7=wait returned,8=tail returned,
+ * 9=DTM1 BUSY wait returned. No marker drives refresh timing.
+ * Five rolling slots retain four completed calls while another is in flight. */
+#define EPD_BUSY_TRACE_LIMIT 80
+#define EPD_BUSY_TAIL_SLOTS 5
+#define EPD_BUSY_TAIL_EVENTS 20
+typedef struct {
+    uint32_t frame;
+    int64_t origin_us;
+    int initial_level;
+    bool complete, overflow;
+    uint8_t count;
+    struct { int64_t us; uint8_t marker, level; } events[EPD_BUSY_TAIL_EVENTS];
+} epd_busy_tail_t;
+static DRAM_ATTR struct {
+    bool session, active, installed, complete, overflow;
+    int initial_level, end_level;
+    int64_t end_us;
+    esp_err_t registration_err;
+    uint32_t frame;
+    uint8_t early_frames, tail_head;
+    uint16_t count;
+    int64_t origin_us;
+    struct { uint32_t us, frame; uint8_t marker, level; } events[EPD_BUSY_TRACE_LIMIT];
+    epd_busy_tail_t tail[EPD_BUSY_TAIL_SLOTS];
+} m_busy_trace;
+static portMUX_TYPE m_busy_trace_mux = portMUX_INITIALIZER_UNLOCKED;
+/* Shared by END's bounded JSON lines; never allocated on film_task's stack. */
+static char m_profile_line[4096];
+
+static void IRAM_ATTR epd_busy_trace_record(uint8_t marker)
+{
+    portENTER_CRITICAL_ISR(&m_busy_trace_mux);
+    if (m_busy_trace.active) {
+        const int64_t now = esp_timer_get_time();
+        const uint8_t level = gpio_ll_get_level(&GPIO, EPD_BUSY_PIN);
+        if (!m_busy_trace.complete && !m_busy_trace.overflow) {
+            if (m_busy_trace.count < EPD_BUSY_TRACE_LIMIT) {
+                const unsigned i = m_busy_trace.count++;
+                m_busy_trace.events[i].us = (uint32_t)(now - m_busy_trace.origin_us);
+                m_busy_trace.events[i].frame = m_busy_trace.frame;
+                m_busy_trace.events[i].marker = marker;
+                m_busy_trace.events[i].level = level;
+            } else {
+                m_busy_trace.overflow = true;
+            }
+        }
+        epd_busy_tail_t *slot = &m_busy_trace.tail[m_busy_trace.tail_head];
+        if (slot->count < EPD_BUSY_TAIL_EVENTS) {
+            const unsigned i = slot->count++;
+            slot->events[i].us = now;
+            slot->events[i].marker = marker;
+            slot->events[i].level = level;
+        } else {
+            slot->overflow = true;
+        }
+    }
+    portEXIT_CRITICAL_ISR(&m_busy_trace_mux);
+}
+
+static void IRAM_ATTR epd_busy_trace_isr(void *arg)
+{
+    (void)arg;
+    epd_busy_trace_record(0);
+}
+
+/* Stop before POF, without logging. Shared GPIO service remains installed. */
+static void epd_busy_trace_stop(void)
+{
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    if (m_busy_trace.active) {
+        m_busy_trace.end_us = esp_timer_get_time();
+        m_busy_trace.end_level = gpio_ll_get_level(&GPIO, EPD_BUSY_PIN);
+        m_busy_trace.active = false;
+    }
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+    if (!m_busy_trace.installed) return;
+    gpio_intr_disable(EPD_BUSY_PIN);
+    gpio_isr_handler_remove(EPD_BUSY_PIN);
+    gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_DISABLE);
+    m_busy_trace.installed = false;
+}
+
+static void epd_busy_trace_frame(uint32_t frame)
+{
+    if (!m_busy_trace.session || m_busy_trace.registration_err) return;
+    if (!m_busy_trace.installed) {
+        /* GPIO11 is exclusively EPD BUSY. Reuse the SD/button ISR service. */
+        esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+        if (err == ESP_ERR_INVALID_STATE) err = ESP_OK;
+        if (err == ESP_OK) err = gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_ANYEDGE);
+        if (err == ESP_OK) err = gpio_isr_handler_add(EPD_BUSY_PIN, epd_busy_trace_isr, NULL);
+        m_busy_trace.registration_err = err;
+        if (err != ESP_OK) {
+            gpio_set_intr_type(EPD_BUSY_PIN, GPIO_INTR_DISABLE);
+            return;
+        }
+        m_busy_trace.installed = true;
+    }
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    if (m_busy_trace.frame)
+        m_busy_trace.tail_head = (m_busy_trace.tail_head + 1) % EPD_BUSY_TAIL_SLOTS;
+    const int64_t now = esp_timer_get_time();
+    const int level = gpio_ll_get_level(&GPIO, EPD_BUSY_PIN);
+    if (!m_busy_trace.frame) {
+        m_busy_trace.initial_level = level;
+        m_busy_trace.origin_us = now;
+    }
+    m_busy_trace.frame = frame;
+    epd_busy_tail_t *slot = &m_busy_trace.tail[m_busy_trace.tail_head];
+    slot->frame = frame;
+    slot->origin_us = now;
+    slot->initial_level = level;
+    slot->count = 0;
+    slot->complete = slot->overflow = false;
+    if (m_busy_trace.early_frames < 5) m_busy_trace.early_frames++;
+    m_busy_trace.active = true;
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+    epd_busy_trace_record(1);
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    if (m_busy_trace.early_frames == 5) m_busy_trace.complete = true;
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+}
+
+static void epd_busy_trace_call_end(uint32_t frame)
+{
+    portENTER_CRITICAL(&m_busy_trace_mux);
+    epd_busy_tail_t *slot = &m_busy_trace.tail[m_busy_trace.tail_head];
+    if (slot->frame == frame && frame) slot->complete = true;
+    portEXIT_CRITICAL(&m_busy_trace_mux);
+}
+
+static void epd_busy_trace_end(void)
+{
+    if (!m_busy_trace.session) return;
+    epd_busy_trace_stop();
+    char *line = m_profile_line;
+    size_t n = (size_t)snprintf(line, sizeof(m_profile_line),
+        "{\"window\":\"early\",\"initial_level\":%d,\"registration_err\":%d,\"overflow\":%s,"
+        "\"capture_complete\":%s,\"origin_us\":%" PRId64 ",\"events\":[",
+        m_busy_trace.initial_level, (int)m_busy_trace.registration_err,
+        m_busy_trace.overflow ? "true" : "false",
+        m_busy_trace.complete && !m_busy_trace.registration_err && !m_busy_trace.overflow ? "true" : "false",
+        m_busy_trace.origin_us);
+    for (unsigned i = 0; i < m_busy_trace.count; i++) {
+        n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+            "%s[%" PRIu32 ",%" PRIu32 ",%u,%u]", i ? "," : "",
+            m_busy_trace.events[i].us, m_busy_trace.events[i].frame,
+            m_busy_trace.events[i].marker, m_busy_trace.events[i].level);
+    }
+    snprintf(line + n, sizeof(m_profile_line) - n, "]}");
+    sys_logi(EPD_TAG, "EPD_BUSY_TRACE %s", line);
+
+    unsigned selected[4], count = 0;
+    for (int back = EPD_BUSY_TAIL_SLOTS - 1; back >= 0; back--) {
+        const unsigned index = (m_busy_trace.tail_head + EPD_BUSY_TAIL_SLOTS - back) % EPD_BUSY_TAIL_SLOTS;
+        if (!m_busy_trace.tail[index].frame || !m_busy_trace.tail[index].complete) continue;
+        if (count == 4) {
+            for (unsigned i = 1; i < 4; i++) selected[i - 1] = selected[i];
+            count--;
+        }
+        selected[count++] = index;
+    }
+    bool overflow = false;
+    for (unsigned i = 0; i < count; i++) overflow |= m_busy_trace.tail[selected[i]].overflow;
+    const int64_t origin = count ? m_busy_trace.tail[selected[0]].origin_us : 0;
+    const epd_busy_tail_t *current = &m_busy_trace.tail[m_busy_trace.tail_head];
+    const uint32_t partial = current->frame && !current->complete ? current->frame : 0;
+    n = (size_t)snprintf(line, sizeof(m_profile_line),
+        "{\"window\":\"tail\",\"initial_level\":%d,\"registration_err\":%d,\"overflow\":%s,"
+        "\"capture_complete\":%s,\"partial_frame\":%" PRIu32 ",\"partial_overflow\":%s,"
+        "\"origin_us\":%" PRId64 ",\"end_us\":%" PRId64 ",\"end_level\":%d,\"frames\":[",
+        count ? m_busy_trace.tail[selected[0]].initial_level : -1,
+        (int)m_busy_trace.registration_err, overflow ? "true" : "false",
+        count == 4 && !overflow && !m_busy_trace.registration_err ? "true" : "false",
+        partial, partial && current->overflow ? "true" : "false", origin,
+        origin ? m_busy_trace.end_us - origin : 0, m_busy_trace.end_level);
+    for (unsigned i = 0; i < count; i++) {
+        const epd_busy_tail_t *slot = &m_busy_trace.tail[selected[i]];
+        n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+            "%s{\"frame\":%" PRIu32 ",\"initial_level\":%d,\"overflow\":%s,\"events\":[",
+            i ? "," : "", slot->frame, slot->initial_level, slot->overflow ? "true" : "false");
+        for (unsigned j = 0; j < slot->count; j++) {
+            n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+                "%s[%" PRId64 ",%u,%u]", j ? "," : "", slot->events[j].us - origin,
+                slot->events[j].marker, slot->events[j].level);
+        }
+        n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n, "]}");
+    }
+    snprintf(line + n, sizeof(m_profile_line) - n, "]}");
+    sys_logi(EPD_TAG, "EPD_BUSY_TRACE %s", line);
+    memset(&m_busy_trace, 0, sizeof(m_busy_trace));
+}
+
+#define EPD_MONO_RECENT_LIMIT 8
+static struct {
+    uint32_t calls, count, next, call_errors, call_timeouts, call_spi_errors;
+    struct {
+        uint32_t frame, stages, timeouts, spi_errors;
+        int64_t started_us, total_us, ram_us, ref_us;
+        bool first_prepare, ok;
+    } recent[EPD_MONO_RECENT_LIMIT];
+    uint32_t steady_count, successful, errors, timeouts, spi_errors;
+    int64_t first_started_us, last_started_us, total_sum_us;
+    int64_t phase_sum[EPD_PROFILE_STAGE_COUNT];
+    int64_t min_ref_us, min_ref_started_us;
+    uint32_t min_ref_frame;
+} m_mono_recent;
+
+static void epd_mono_recent_add(int64_t total, int64_t other, bool ok, bool steady)
+{
+    if (!m_profile.call_id) return;
+    m_mono_recent.call_errors += !ok;
+    m_mono_recent.call_timeouts += m_profile.timeouts;
+    m_mono_recent.call_spi_errors += m_profile.spi_errors;
+    const unsigned i = m_mono_recent.next;
+    m_mono_recent.recent[i].frame = m_profile.call_id;
+    m_mono_recent.recent[i].started_us = m_profile.started_us;
+    m_mono_recent.recent[i].total_us = total;
+    m_mono_recent.recent[i].ram_us = m_profile.stage_us[EPD_PROFILE_RAM];
+    m_mono_recent.recent[i].ref_us = m_profile.stage_us[EPD_PROFILE_REF];
+    m_mono_recent.recent[i].stages = m_profile.stages;
+    m_mono_recent.recent[i].first_prepare = m_profile.first_prepare;
+    m_mono_recent.recent[i].ok = ok;
+    m_mono_recent.recent[i].timeouts = m_profile.timeouts;
+    m_mono_recent.recent[i].spi_errors = m_profile.spi_errors;
+    m_mono_recent.next = (i + 1) % EPD_MONO_RECENT_LIMIT;
+    if (m_mono_recent.count < EPD_MONO_RECENT_LIMIT) m_mono_recent.count++;
+    if (!steady) return;
+    if (!m_mono_recent.steady_count) m_mono_recent.first_started_us = m_profile.started_us;
+    m_mono_recent.last_started_us = m_profile.started_us;
+    m_mono_recent.steady_count++;
+    m_mono_recent.timeouts += m_profile.timeouts;
+    m_mono_recent.spi_errors += m_profile.spi_errors;
+    if (!ok) {
+        m_mono_recent.errors++;
+        return;
+    }
+    if (!m_mono_recent.successful || m_profile.stage_us[EPD_PROFILE_REF] < m_mono_recent.min_ref_us) {
+        m_mono_recent.min_ref_us = m_profile.stage_us[EPD_PROFILE_REF];
+        m_mono_recent.min_ref_frame = m_profile.call_id;
+        m_mono_recent.min_ref_started_us = m_profile.started_us;
+    }
+    m_mono_recent.successful++;
+    m_mono_recent.total_sum_us += total;
+    for (unsigned j = 0; j < EPD_PROFILE_STAGE_COUNT; j++)
+        m_mono_recent.phase_sum[j] += j == EPD_PROFILE_OTHER ? other : m_profile.stage_us[j];
+}
+
+static void epd_mono_recent_end(void)
+{
+    char *line = m_profile_line;
+    size_t n = (size_t)snprintf(line, sizeof(m_profile_line),
+        "{\"unit\":\"us\",\"calls_seen\":%" PRIu32 ",\"errors\":%" PRIu32 ",\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"calls\":[",
+        m_mono_recent.calls, m_mono_recent.call_errors, m_mono_recent.call_timeouts, m_mono_recent.call_spi_errors);
+    for (unsigned i = 0; i < m_mono_recent.count; i++) {
+        const unsigned j = (m_mono_recent.next + EPD_MONO_RECENT_LIMIT - m_mono_recent.count + i) % EPD_MONO_RECENT_LIMIT;
+        n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+            "%s[%" PRIu32 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRIu32 ",%s,%s,%" PRIu32 ",%" PRIu32 "]",
+            i ? "," : "", m_mono_recent.recent[j].frame, m_mono_recent.recent[j].started_us,
+            m_mono_recent.recent[j].total_us, m_mono_recent.recent[j].ram_us, m_mono_recent.recent[j].ref_us,
+            m_mono_recent.recent[j].stages, m_mono_recent.recent[j].first_prepare ? "true" : "false",
+            m_mono_recent.recent[j].ok ? "true" : "false", m_mono_recent.recent[j].timeouts,
+            m_mono_recent.recent[j].spi_errors);
+    }
+    n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+        "],\"steady\":{\"count\":%" PRIu32 ",\"ok_count\":%" PRIu32 ",\"errors\":%" PRIu32 ","
+        "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"first_started_us\":%" PRId64 ","
+        "\"last_started_us\":%" PRId64 ",\"total_sum_us\":%" PRId64 ",\"phase_sum_us\":[",
+        m_mono_recent.steady_count, m_mono_recent.successful, m_mono_recent.errors,
+        m_mono_recent.timeouts, m_mono_recent.spi_errors, m_mono_recent.first_started_us,
+        m_mono_recent.last_started_us, m_mono_recent.total_sum_us);
+    for (unsigned i = 0; i < EPD_PROFILE_STAGE_COUNT; i++)
+        n += (size_t)snprintf(line + n, sizeof(m_profile_line) - n,
+            "%s%" PRId64, i ? "," : "", m_mono_recent.phase_sum[i]);
+    snprintf(line + n, sizeof(m_profile_line) - n,
+        "],\"min_ref_us\":%" PRId64 ",\"min_ref_frame\":%" PRIu32 ",\"min_ref_started_us\":%" PRId64 "}}",
+        m_mono_recent.min_ref_us, m_mono_recent.min_ref_frame, m_mono_recent.min_ref_started_us);
+    sys_logi(EPD_TAG, "EPD_MONO_RECENT %s", line);
+    memset(&m_mono_recent, 0, sizeof(m_mono_recent));
+}
+
+static int epd_profile_interval_compare(const void *a, const void *b)
+{
+    const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static void epd_profile_session_begin(void)
+{
+    memset(&m_profile_session, 0, sizeof(m_profile_session));
+    memset(&m_mono_recent, 0, sizeof(m_mono_recent));
+    memset(&m_busy_trace, 0, sizeof(m_busy_trace));
+    m_busy_trace.session = true;
+    m_busy_trace.initial_level = m_busy_trace.end_level = -1;
+}
+
+static void epd_profile_session_end(void)
+{
+    const bool had_session = m_busy_trace.session;
+    epd_busy_trace_end();
+    if (had_session) epd_mono_recent_end();
+    if (m_profile_session.samples || m_profile_session.dropped) {
+        const uint32_t n = m_profile_session.interval_count;
+        uint64_t interval_sum = 0;
+        for (uint32_t i = 0; i < n; i++) interval_sum += m_profile_session.intervals[i];
+        qsort(m_profile_session.intervals, n, sizeof(uint32_t), epd_profile_interval_compare);
+        const double median = n ? ((double)m_profile_session.intervals[(n - 1) / 2]
+                                  + m_profile_session.intervals[n / 2]) / 2 : 0;
+        ESP_LOGI(EPD_TAG, "EPD_PROFILE_SESSION {\"path\":\"mono\",\"scope\":\"mono_session\",\"unit\":\"us\","
+                 "\"sample_count\":%" PRIu32 ",\"ok_samples\":%" PRIu32 ",\"error_samples\":%" PRIu32 ",\"dropped_samples\":%" PRIu32 ","
+                 "\"first_started_us\":%" PRId64 ",\"last_started_us\":%" PRId64 ","
+                 "\"total_sum_us\":%" PRId64 ",\"total_min_us\":%" PRId64 ",\"total_max_us\":%" PRId64 ","
+                 "\"sum_us\":{\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
+                 "\"ref_us\":%" PRId64 ",\"pon_us\":%" PRId64 ",\"pof_us\":%" PRId64 ",\"other_us\":%" PRId64 "},"
+                 "\"bytes_sum\":%" PRIu64 ",\"ram_bytes_sum\":%" PRIu64 ",\"ram_transactions_sum\":%" PRIu64 ",\"stages_sum\":%" PRIu64 ","
+                 "\"interval_count\":%" PRIu32 ",\"interval_min_us\":%" PRIu32 ",\"interval_p50_us\":%.1f,"
+                 "\"interval_max_us\":%" PRIu32 ",\"interval_sum_us\":%" PRIu64 ","
+                 "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"ok\":%s}",
+                 m_profile_session.samples, m_profile_session.successful, m_profile_session.errors, m_profile_session.dropped,
+                 m_profile_session.first_started_us, m_profile_session.last_started_us,
+                 m_profile_session.total_sum, m_profile_session.total_min, m_profile_session.total_max,
+                 m_profile_session.phase_sum[EPD_PROFILE_INIT], m_profile_session.phase_sum[EPD_PROFILE_LUT],
+                 m_profile_session.phase_sum[EPD_PROFILE_RAM], m_profile_session.phase_sum[EPD_PROFILE_REF],
+                 m_profile_session.phase_sum[EPD_PROFILE_PON], m_profile_session.phase_sum[EPD_PROFILE_POF],
+                 m_profile_session.phase_sum[EPD_PROFILE_OTHER],
+                 m_profile_session.bytes_sum, m_profile_session.ram_bytes_sum,
+                 m_profile_session.ram_transactions_sum, m_profile_session.stages_sum,
+                 n, n ? m_profile_session.intervals[0] : 0, median,
+                 n ? m_profile_session.intervals[n - 1] : 0, interval_sum,
+                 m_profile_session.timeouts, m_profile_session.spi_errors,
+                 m_profile_session.errors ? "false" : "true");
+    }
+    memset(&m_profile_session, 0, sizeof(m_profile_session));
+}
+
+static void epd_profile_session_add(int64_t total_us, int64_t other_us, bool ok)
+{
+    /* Errors cover all calls, even past capacity; sums cover retained good calls. */
+    m_profile_session.timeouts += m_profile.timeouts;
+    m_profile_session.spi_errors += m_profile.spi_errors;
+    if (!ok) m_profile_session.errors++;
+    if (m_profile_session.samples == EPD_PROFILE_SESSION_LIMIT) {
+        m_profile_session.dropped++;
+        return;
+    }
+    if (m_profile_session.samples) {
+        const int64_t elapsed = m_profile.started_us - m_profile_session.last_started_us;
+        m_profile_session.intervals[m_profile_session.interval_count++] =
+            elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+    } else {
+        m_profile_session.first_started_us = m_profile.started_us;
+    }
+    m_profile_session.last_started_us = m_profile.started_us;
+    m_profile_session.samples++;
+    if (!ok) return;
+    if (!m_profile_session.successful || total_us < m_profile_session.total_min)
+        m_profile_session.total_min = total_us;
+    if (total_us > m_profile_session.total_max) m_profile_session.total_max = total_us;
+    m_profile_session.successful++;
+    m_profile_session.total_sum += total_us;
+    for (int i = EPD_PROFILE_INIT; i < EPD_PROFILE_STAGE_COUNT; i++)
+        m_profile_session.phase_sum[i] += m_profile.stage_us[i];
+    m_profile_session.phase_sum[EPD_PROFILE_OTHER] += other_us;
+    m_profile_session.bytes_sum += m_profile.bytes;
+    m_profile_session.ram_bytes_sum += m_profile.ram_bytes;
+    m_profile_session.ram_transactions_sum += m_profile.ram_transactions;
+    m_profile_session.stages_sum += m_profile.stages;
+}
+
+static void epd_profile_begin(const char *path)
+{
+    memset(&m_profile, 0, sizeof(m_profile));
+    m_profile.path = path;
+    m_profile.mono_session = m_mono_session;
+    m_profile.busy_ignored = m_ignore_busy;
+    m_profile.active = true;
+    m_profile.started_us = esp_timer_get_time();
+    if (m_mono_session && !strcmp(path, "mono")) {
+        m_profile.call_id = ++m_mono_recent.calls;
+        if (m_profile_session.samples) epd_busy_trace_frame(m_profile.call_id);
+    }
+}
+
+static int64_t epd_profile_stage_begin(epd_profile_stage_t stage)
+{
+    if (!m_profile.active) return 0;
+    m_profile.stage = stage;
+    return esp_timer_get_time();
+}
+
+static void epd_profile_stage_end(epd_profile_stage_t stage, int64_t started_us)
+{
+    if (!m_profile.active) return;
+    m_profile.stage_us[stage] += esp_timer_get_time() - started_us;
+    m_profile.stage = EPD_PROFILE_OTHER;
+}
+
+static void epd_profile_error(esp_err_t err, bool timeout)
+{
+    if (!m_profile.active) return;
+    if (m_profile.first_error == ESP_OK) m_profile.first_error = err;
+    if (timeout) m_profile.timeouts++;
+}
+
+static void epd_profile_spi(esp_err_t err, uint32_t bytes, bool payload)
+{
+    if (!m_profile.active) return;
+    if (err != ESP_OK) {
+        m_profile.spi_errors++;
+        epd_profile_error(err, false);
+        return;
+    }
+    m_profile.bytes += bytes;
+    if (payload && m_profile.stage == EPD_PROFILE_LUT) m_profile.lut_bytes += bytes;
+    if (payload && m_profile.stage == EPD_PROFILE_RAM) {
+        m_profile.ram_bytes += bytes;
+        m_profile.ram_transactions++;
+    }
+}
+
+static void epd_profile_end(void)
+{
+    const int64_t total_us = esp_timer_get_time() - m_profile.started_us;
+    int64_t other_us = total_us;
+    for (int i = EPD_PROFILE_INIT; i < EPD_PROFILE_STAGE_COUNT; i++)
+        other_us -= m_profile.stage_us[i];
+    const bool ok = m_profile.first_error == ESP_OK && !m_profile.busy_ignored;
+    m_profile.active = false;  /* Serial logging is outside the timed call. */
+    const bool steady = m_profile.mono_session && !strcmp(m_profile.path, "mono") &&
+        !m_profile.first_prepare && !m_profile.stage_us[EPD_PROFILE_INIT] &&
+        !m_profile.stage_us[EPD_PROFILE_PON];
+    if (m_profile.call_id) {
+        epd_mono_recent_add(total_us, other_us, ok, steady);
+        epd_busy_trace_call_end(m_profile.call_id);
+    }
+    if (steady) {
+        epd_profile_session_add(total_us, other_us, ok);
+        return;
+    }
+    ESP_LOGI(EPD_TAG, "EPD_PROFILE {\"path\":\"%s\",\"scope\":\"driver_call\",\"unit\":\"us\","
+             "\"started_us\":%" PRId64 ",\"total_us\":%" PRId64 ","
+             "\"init_us\":%" PRId64 ",\"lut_us\":%" PRId64 ",\"ram_us\":%" PRId64 ","
+             "\"ref_us\":%" PRId64 ",\"pon_us\":%" PRId64 ",\"pof_us\":%" PRId64 ",\"other_us\":%" PRId64 ","
+             "\"bytes\":%" PRIu32 ",\"lut_bytes\":%" PRIu32 ",\"ram_bytes\":%" PRIu32 ","
+             "\"ram_transactions\":%" PRIu32 ",\"stages\":%" PRIu32 ",\"first_prepare\":%s,\"mono_session\":%s,"
+             "\"timeouts\":%" PRIu32 ",\"spi_errors\":%" PRIu32 ",\"first_error\":%d,"
+             "\"busy_ignored\":%s,\"ok\":%s}",
+             m_profile.path, m_profile.started_us, total_us,
+             m_profile.stage_us[EPD_PROFILE_INIT], m_profile.stage_us[EPD_PROFILE_LUT],
+             m_profile.stage_us[EPD_PROFILE_RAM], m_profile.stage_us[EPD_PROFILE_REF],
+             m_profile.stage_us[EPD_PROFILE_PON], m_profile.stage_us[EPD_PROFILE_POF], other_us,
+             m_profile.bytes, m_profile.lut_bytes, m_profile.ram_bytes,
+             m_profile.ram_transactions, m_profile.stages,
+             m_profile.first_prepare ? "true" : "false", m_profile.mono_session ? "true" : "false",
+             m_profile.timeouts, m_profile.spi_errors, (int)m_profile.first_error,
+             m_profile.busy_ignored ? "true" : "false", ok ? "true" : "false");
+}
+
+#define EPD_BUSY_TRACE(marker) epd_busy_trace_record(marker)
+#define EPD_PROFILE_SESSION_STOP() epd_busy_trace_stop()
+#define EPD_PROFILE_SESSION_BEGIN() epd_profile_session_begin()
+#define EPD_PROFILE_SESSION_END() epd_profile_session_end()
+#define EPD_PROFILE_BEGIN(path) epd_profile_begin(path)
+#define EPD_PROFILE_END() epd_profile_end()
+#define EPD_PROFILE_STAGE_BEGIN(name) \
+    const int64_t profile_##name##_started_us = epd_profile_stage_begin(EPD_PROFILE_##name)
+#define EPD_PROFILE_STAGE_END(name) \
+    epd_profile_stage_end(EPD_PROFILE_##name, profile_##name##_started_us)
+#define EPD_PROFILE_SPI(call, bytes, payload) epd_profile_spi((call), (bytes), (payload))
+#define EPD_PROFILE_ERROR(err) epd_profile_error((err), false)
+#define EPD_PROFILE_TIMEOUT() epd_profile_error(ESP_ERR_TIMEOUT, true)
+#define EPD_PROFILE_PREPARE() do { if (m_profile.active) m_profile.first_prepare = true; } while (0)
+#define EPD_PROFILE_REF_COUNT() do { if (m_profile.active) m_profile.stages++; } while (0)
+#else
+#define EPD_BUSY_TRACE(marker) ((void)0)
+#define EPD_PROFILE_SESSION_STOP() ((void)0)
+#define EPD_PROFILE_SESSION_BEGIN() ((void)0)
+#define EPD_PROFILE_SESSION_END() ((void)0)
+#define EPD_PROFILE_BEGIN(path) ((void)0)
+#define EPD_PROFILE_END() ((void)0)
+#define EPD_PROFILE_STAGE_BEGIN(name) ((void)0)
+#define EPD_PROFILE_STAGE_END(name) ((void)0)
+#define EPD_PROFILE_SPI(call, bytes, payload) ((void)(call))
+#define EPD_PROFILE_ERROR(err) ((void)0)
+#define EPD_PROFILE_TIMEOUT() ((void)0)
+#define EPD_PROFILE_PREPARE() ((void)0)
+#define EPD_PROFILE_REF_COUNT() ((void)0)
+#endif
+
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
@@ -681,7 +1218,7 @@ static void EPD_W21_WriteCMD(unsigned char command)
     memset(&t, 0, sizeof(t));
     t.length = 8;
     t.tx_buffer = &command;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), 1, false);
     EPD_W21_CS_1;
 }
 
@@ -693,7 +1230,7 @@ static void EPD_W21_WriteDATA(unsigned char datas)
     memset(&t, 0, sizeof(t));
     t.length = 8;
     t.tx_buffer = &datas;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), 1, false);
     EPD_W21_CS_1;
 }
 
@@ -705,7 +1242,7 @@ static void EPD_W21_WriteDATA_Bulk(const unsigned char *data, uint32_t len)
     memset(&t, 0, sizeof(t));
     t.length = len * 8;
     t.tx_buffer = data;
-    spi_device_transmit(m_spi_device, &t);
+    EPD_PROFILE_SPI(spi_device_transmit(m_spi_device, &t), len, true);
     EPD_W21_CS_1;
 }
 
@@ -729,6 +1266,7 @@ static bool epd_wait_busy(uint32_t timeout_ms)
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > timeout_ms)
         {
             sys_logw(EPD_TAG, "wait busy timeout (active_low=%d)", m_busy_active_low ? 1 : 0);
+            EPD_PROFILE_TIMEOUT();
             return false;
         }
     }
@@ -879,16 +1417,20 @@ static void epd_display_solid(unsigned char color_byte)
 
 static void epd_spectra_wave(const uint8_t *lut)
 {
+    EPD_PROFILE_STAGE_BEGIN(LUT);
     // 波形载入前导 + 799 字节波形表（末尾对齐字节不进入 SPI）
     EPD_W21_WriteCMD(JD7601_CMD_WAVE_PRE);
     EPD_W21_WriteDATA(0x0F);
     EPD_W21_WriteDATA(0xA9);
     EPD_W21_WriteCMD(JD7601_CMD_WRITE_LUT);
     EPD_W21_WriteDATA_Bulk(lut, 799);
+    EPD_PROFILE_STAGE_END(LUT);
 }
 
 static void epd_spectra_init(void)
 {
+    EPD_PROFILE_STAGE_BEGIN(INIT);
+    EPD_PROFILE_PREPARE();
     // 复位序列（双脉冲），BUSY 极性沿用默认（低电平忙）
     EPD_W21_RST_0; vTaskDelay(20 / portTICK_PERIOD_MS);
     EPD_W21_RST_1; vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -912,6 +1454,7 @@ static void epd_spectra_init(void)
 
     m_spectra_state = 0;
     m_panel_powered = false;   // 复位序列后面板回到未上电态
+    EPD_PROFILE_STAGE_END(INIT);
 }
 
 // wait_cycle：先等 BUSY 拉低（进入忙），再等拉高（释放）
@@ -928,6 +1471,7 @@ static void epd_spectra_wait_cycle(uint32_t assert_timeout_ms, uint32_t release_
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > assert_timeout_ms)
         {
             sys_logw(EPD_TAG, "spectra busy assert timeout");
+            EPD_PROFILE_TIMEOUT();
             return;
         }
     }
@@ -940,6 +1484,7 @@ static void epd_spectra_wait_cycle(uint32_t assert_timeout_ms, uint32_t release_
         if (((xTaskGetTickCount() - start) * portTICK_PERIOD_MS) > release_timeout_ms)
         {
             sys_logw(EPD_TAG, "spectra busy release timeout");
+            EPD_PROFILE_TIMEOUT();
             return;
         }
     }
@@ -958,12 +1503,14 @@ static void epd_spectra_power_off(void)
         return;
     }
 
+    EPD_PROFILE_STAGE_BEGIN(POF);
     EPD_W21_WriteCMD(POF);   // 0x02
     EPD_W21_WriteDATA(0x00);
     epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_POWER_MS);
     vTaskDelay(20 / portTICK_PERIOD_MS);
 
     m_panel_powered = false;
+    EPD_PROFILE_STAGE_END(POF);
 }
 
 static void epd_spectra_refresh(bool power_on, bool power_off)
@@ -971,16 +1518,26 @@ static void epd_spectra_refresh(bool power_on, bool power_off)
     /* PON 幂等：会话内已上电就不再付一次 PON 的 BUSY 等待（实测约 100ms/次） */
     if (power_on && !m_panel_powered)
     {
+        EPD_PROFILE_STAGE_BEGIN(PON);
         EPD_W21_WriteCMD(PON);   // 0x04
         epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_POWER_MS);
         vTaskDelay(10 / portTICK_PERIOD_MS);
         m_panel_powered = true;
+        EPD_PROFILE_STAGE_END(PON);
     }
 
+    EPD_PROFILE_STAGE_BEGIN(REF);
+    EPD_PROFILE_REF_COUNT();
+    EPD_BUSY_TRACE(5);
     EPD_W21_WriteCMD(REF);   // 0x12
     EPD_W21_WriteDATA(0x00);
+    EPD_BUSY_TRACE(6);
     epd_spectra_wait_cycle(1000, BUSY_TIMEOUT_REFRESH_MS);
+    EPD_BUSY_TRACE(7);
     vTaskDelay(10 / portTICK_PERIOD_MS);
+    EPD_BUSY_TRACE(8);
+
+    EPD_PROFILE_STAGE_END(REF);
 
     if (power_off)
     {
@@ -991,6 +1548,7 @@ static void epd_spectra_refresh(bool power_on, bool power_off)
 // 写入一整帧（172800 字节 = 480 行 x 360 字节）的填充值
 static void epd_spectra_fill(uint8_t fill_byte)
 {
+    EPD_PROFILE_STAGE_BEGIN(RAM);
     uint8_t line[EPD_INPUT_LINE];
     memset(line, fill_byte, EPD_INPUT_LINE);
 
@@ -1001,11 +1559,13 @@ static void epd_spectra_fill(uint8_t fill_byte)
         EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
     }
 
+    EPD_PROFILE_STAGE_END(RAM);
     epd_spectra_refresh(true, true);
 }
 
 static void epd_spectra_full_clear(void)
 {
+    EPD_PROFILE_PREPARE();
     epd_spectra_wave(full_clear);
     epd_spectra_fill(0x00);
     memset(m_mono_prev, MONO_CODE_INIT_BYTE, EPD_MONO_BYTES);   // 清屏后面板为黑，上一帧按黑复位
@@ -1028,6 +1588,7 @@ static void epd_spectra_encode_row(const uint8_t *row, uint8_t plane, uint8_t *o
 // 写一个平面的整帧数据（输入为 8bpp 索引缓冲）
 static void epd_spectra_write_plane(const uint8_t *index8, uint8_t plane)
 {
+    EPD_PROFILE_STAGE_BEGIN(RAM);
     uint8_t line[EPD_INPUT_LINE];
 
     EPD_W21_WriteCMD(DTM1);   // 0x10
@@ -1037,6 +1598,7 @@ static void epd_spectra_write_plane(const uint8_t *index8, uint8_t plane)
         epd_spectra_encode_row(index8 + row * EPD_WIDTH, plane, line);
         EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
     }
+    EPD_PROFILE_STAGE_END(RAM);
 }
 
 // 彩色多相位刷新：mode 0 = ColorFast(2 相), 1 = ColorQual(3 相)
@@ -1273,8 +1835,10 @@ void hal_epd_display_film(const unsigned char *filmData)
 
 void hal_epd_sleep(void)
 {
+    EPD_PROFILE_SESSION_STOP();
     /* 深睡之前先把面板 DC/DC 断掉：黑白快刷会话期间面板是保持上电的 */
     epd_spectra_power_off();
+    EPD_PROFILE_SESSION_END();
 
     epd_wait_busy(BUSY_TIMEOUT_INIT_MS);
     EPD_W21_WriteCMD(DSLP);  // 0x07
@@ -1288,16 +1852,19 @@ void hal_epd_sleep(void)
 
 void hal_epd_mono_session_begin(void)
 {
+    if (!m_mono_session) EPD_PROFILE_SESSION_BEGIN();
     m_mono_session = true;
 }
 
 void hal_epd_mono_session_end(void)
 {
     m_mono_session = false;
+    EPD_PROFILE_SESSION_STOP();
 
     /* 结束"保持上电"的黑白快刷会话：把播放期间省下的那一趟 PON/POF 补上。
        已经在断电态时是空操作，可重复调用。 */
     epd_spectra_power_off();
+    EPD_PROFILE_SESSION_END();
 }
 
 void hal_epd_pwroff(void)
@@ -1310,6 +1877,7 @@ void hal_epd_pwroff(void)
 
 void hal_epd_deinit(void)
 {
+    EPD_PROFILE_SESSION_END();
     if (m_spi_device != NULL)
     {
         spi_bus_remove_device(m_spi_device);
@@ -1373,6 +1941,7 @@ static uint8_t epd_spectra_mono_code_byte(uint8_t bitmap_byte)
 // 上一帧初值按各分支实际得到的画面复位：清屏为黑 → INIT_BYTE；写白帧 → mono_write 自身已更新
 static void epd_spectra_prepare(void)
 {
+    EPD_PROFILE_PREPARE();
     if (m_spectra_state == 0)
     {
         // native/quality → 全清理（内部已把上一帧复位为黑）
@@ -1398,29 +1967,42 @@ static void epd_spectra_prepare(void)
 // 写一帧黑白差分数据。mono_bitmap 为 NULL 时表示全白（清屏）
 static void epd_spectra_mono_write(const uint8_t *mono_bitmap)
 {
-    uint8_t line[EPD_INPUT_LINE];
+    EPD_PROFILE_STAGE_BEGIN(RAM);
+    /* Calls are serialized by the UI/direct-display handoff. Keep this 4-row
+     * buffer in internal DMA RAM instead of growing the UI/film task stacks. */
+    static DMA_ATTR uint8_t batch[EPD_INPUT_LINE * EPD_MONO_BATCH_LINES];
 
+    EPD_BUSY_TRACE(2);
     EPD_W21_WriteCMD(DTM1);   // 0x10
+    EPD_BUSY_TRACE(3);
     epd_wait_busy(BUSY_TIMEOUT_INIT_MS);
-    for (int row = 0; row < EPD_HEIGHT; row++)
+    EPD_BUSY_TRACE(9);
+    for (int row = 0; row < EPD_HEIGHT; row += EPD_MONO_BATCH_LINES)
     {
-        const uint8_t *src = mono_bitmap ? (mono_bitmap + row * EPD_MONO_LINE) : NULL;
-        uint8_t *prev = m_mono_prev + row * EPD_MONO_LINE;
-        for (int x = 0; x < EPD_MONO_LINE; x++)
+        for (int batch_row = 0; batch_row < EPD_MONO_BATCH_LINES; batch_row++)
         {
-            uint8_t old = prev[x];
-            uint8_t next = epd_spectra_mono_code_byte(src ? src[x] : 0x00);
-            prev[x] = next;   // 更新上一帧（码位域）
-            for (int j = 0; j < 4; j++)
+            uint8_t *line = batch + batch_row * EPD_INPUT_LINE;
+            const int y = row + batch_row;
+            const uint8_t *src = mono_bitmap ? (mono_bitmap + y * EPD_MONO_LINE) : NULL;
+            uint8_t *prev = m_mono_prev + y * EPD_MONO_LINE;
+            for (int x = 0; x < EPD_MONO_LINE; x++)
             {
-                line[x * 4 + j] = (uint8_t)(((old << 5) & 0x20) | ((next << 4) & 0x10)
-                                            | (old & 2) | ((next >> 1) & 1));
-                old >>= 2;
-                next >>= 2;
+                uint8_t old = prev[x];
+                uint8_t next = epd_spectra_mono_code_byte(src ? src[x] : 0x00);
+                prev[x] = next;   // 更新上一帧（码位域）
+                for (int j = 0; j < 4; j++)
+                {
+                    line[x * 4 + j] = (uint8_t)(((old << 5) & 0x20) | ((next << 4) & 0x10)
+                                                | (old & 2) | ((next >> 1) & 1));
+                    old >>= 2;
+                    next >>= 2;
+                }
             }
         }
-        EPD_W21_WriteDATA_Bulk(line, EPD_INPUT_LINE);
+        EPD_W21_WriteDATA_Bulk(batch, sizeof(batch));
     }
+    EPD_BUSY_TRACE(4);
+    EPD_PROFILE_STAGE_END(RAM);
 }
 
 static void epd_spectra_mono_display(const uint8_t *mono_bitmap, bool is_clear)
@@ -1449,27 +2031,36 @@ static void epd_spectra_mono_display(const uint8_t *mono_bitmap, bool is_clear)
 // 带 mode 的 8bpp 显示：mode 0 = ColorFast(2 相), 1 = ColorQual(3 相)
 void hal_epd_display_8bpp_mode(const unsigned char *index8Data, uint8_t mode)
 {
+    EPD_PROFILE_BEGIN(mode == 0 ? "color_fast" : "color_qual");
     if (index8Data == NULL)
     {
         sys_loge(EPD_TAG, "index8Data is NULL");
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
     if (mode > 1)
     {
         sys_loge(EPD_TAG, "Invalid 8bpp mode: %u (expected 0=ColorFast, 1=ColorQual)", mode);
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
 
     epd_spectra_init();
     epd_spectra_display_color(index8Data, mode);
+    EPD_PROFILE_END();
     sys_logi(EPD_TAG, "Display 8bpp mode=%u completed", mode);
 }
 
 void hal_epd_display_mono(const unsigned char *mono_bitmap)
 {
+    EPD_PROFILE_BEGIN("mono");
     if (mono_bitmap == NULL)
     {
         sys_loge(EPD_TAG, "mono_bitmap is NULL");
+        EPD_PROFILE_ERROR(ESP_ERR_INVALID_ARG);
+        EPD_PROFILE_END();
         return;
     }
 
@@ -1481,6 +2072,7 @@ void hal_epd_display_mono(const unsigned char *mono_bitmap)
     }
 
     epd_spectra_mono_display(mono_bitmap, false);
+    EPD_PROFILE_END();
     sys_logd(EPD_TAG, "Display mono (B/W fast refresh) completed");
 }
 

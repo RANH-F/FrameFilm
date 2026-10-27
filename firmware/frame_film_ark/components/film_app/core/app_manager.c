@@ -30,6 +30,7 @@
  * INCLUDES
  */
 #include <string.h>
+#include <stdio.h>
 #include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
@@ -128,6 +129,7 @@ static void app_task_handle(void *pvParameters);
 static void app_timer_callback(TimerHandle_t xTimer);
 static void app_handle_event(const app_event_t *e);
 static void app_do_switch(app_id_t id);
+static uint8_t app_do_switch_target(app_id_t id, const char *filename);
 static void app_menu_notice(const char *why);
 static void app_manager_sleep_from_app(void);
 static int app_param_ch_route(uint8_t ch, const uint8_t *data, uint8_t len);
@@ -352,6 +354,12 @@ static void app_manager_on_sys_event(const sys_event_t *e, void *ctx)
     if(xQueueSend(m_app_queue_hdl, &ae, 0) != pdPASS)
     {
         sys_logw(APP_MANAGER_TAG, "app queue full, drop evt=0x%04X", (unsigned)e->id);
+        if(e->id == SYS_EVT_BLE_APP_CMD && e->len > 2 &&
+           e->payload[0] == BLE_FILM_TRANS_CH_CTRL_APP_SWITCH)
+        {
+            uint8_t response[2] = {e->payload[1], 3};
+            service_ble_send_resp(BLE_FILM_TRANS_CH_CTRL_APP_SWITCH, response, sizeof(response));
+        }
     }
 }
 
@@ -361,7 +369,7 @@ static void app_manager_on_sys_event(const sys_event_t *e, void *ctx)
  * 按 ch 查归属 app，与“当前 app”无关：手机可在显示图片时预设动图参数。
  * SET 只调 on_param_set（app 仅改自己的结构体，不刷屏、不落盘），
  * 落盘由本函数按归属 app 完成（见下方 app_state_save_of）；
- * GET 调 on_param_get 组帧后经 service_ble_send_resp 回发。
+ * GET 先确保状态已载入，再调 on_param_get 组帧并经 service_ble_send_resp 回发。
  *
  * @return 1 已消费（是参数通道）；0 非参数通道，交回既有逻辑
  */
@@ -392,7 +400,7 @@ static int app_param_ch_route(uint8_t ch, const uint8_t *data, uint8_t len)
     else
     {
         uint8_t out[APP_PARAM_GET_BUF_MAX];
-        uint8_t n = (owner->on_param_get != NULL) ? owner->on_param_get(out, sizeof(out)) : 0;
+        uint8_t n = app_manager_param_get((uint8_t)owner->id, out, sizeof(out));
         service_ble_send_resp(ch, out, n);
     }
     return 1;
@@ -471,6 +479,26 @@ static void app_handle_event(const app_event_t *e)
             atomic_store(&m_sleep_stop_sent, false);
         return;
     }
+    /* Extended 0x4B is acknowledged after the app task has resolved the name.
+       Busy gates reject it explicitly, so the client may retry without a timer. */
+    if(e->type == APP_EVT_SYS && e->cmd == SYS_EVT_BLE_APP_CMD &&
+       e->len > 2 && e->payload[0] == BLE_FILM_TRANS_CH_CTRL_APP_SWITCH)
+    {
+        uint8_t response[2] = {e->payload[1], 1};
+        const char *filename = (const char *)&e->payload[2];
+        size_t name_bytes = e->len - 2;
+        if(e->len >= 4 && response[0] == APP_ID_IMAGE &&
+           filename[name_bytes - 1] == '\0' &&
+           memchr(filename, '\0', name_bytes - 1) == NULL &&
+           strchr(filename, '/') == NULL && strchr(filename, '\\') == NULL)
+        {
+            response[1] = (m_sleep_page || m_boot_page) ? 3 :
+                          app_do_switch_target((app_id_t)response[0], filename);
+        }
+        service_ble_send_resp(BLE_FILM_TRANS_CH_CTRL_APP_SWITCH, response, sizeof(response));
+        return;
+    }
+
     /* 入睡后可能还要等直传恢复网络；这期间不能被排队事件重新启动 app。 */
     if(m_sleep_page)
     {
@@ -555,7 +583,7 @@ static void app_handle_event(const app_event_t *e)
         /* 调度器级：BLE 请求切换 app（payload: [0]=命令通道，[1]=目标 app id） */
         if((uint16_t)e->cmd == SYS_EVT_BLE_APP_CMD)
         {
-            if(e->len >= 2 && e->payload[0] == BLE_FILM_TRANS_CH_CTRL_APP_SWITCH)
+            if(e->len == 2 && e->payload[0] == BLE_FILM_TRANS_CH_CTRL_APP_SWITCH)
             {
                 app_do_switch((app_id_t)e->payload[1]);
             }
@@ -616,9 +644,14 @@ static void app_menu_notice(const char *why)
 
 static void app_do_switch(app_id_t id)
 {
+    (void)app_do_switch_target(id, NULL);
+}
+
+static uint8_t app_do_switch_target(app_id_t id, const char *filename)
+{
     if(m_sleep_page)
     {
-        return;
+        return 3;
     }
 
     /* 未注册的 app 不可切换：BLE 传来的非法 id 或按模式裁剪掉的 app 会走到这里，
@@ -626,9 +659,9 @@ static void app_do_switch(app_id_t id)
     if(!app_is_registered(id))
     {
         sys_logw(APP_MANAGER_TAG, "switch ignored: app id=%d not registered", (int)id);
-        return;
+        return 1;
     }
-    if(id == m_current_app && m_app_running)
+    if(filename == NULL && id == m_current_app && m_app_running)
     {
         /* 已是当前 app，正常无需动作。但若它是 UI 层且被直绘场景暂停过输出，
            必须恢复，否则页面会永远停在暂停态（屏上留着直绘内容）。
@@ -637,10 +670,19 @@ static void app_do_switch(app_id_t id)
         {
             ui_core_resume();
         }
-        return;   // 已是当前运行 app
+        return 0;   // 已是当前运行 app
     }
 
     const app_entry_t *app = m_app_registry[id];
+    if(filename != NULL)
+    {
+        if(id != APP_ID_IMAGE || app->prepare_open == NULL) return 1;
+        /* Invalid names must not replace the old app's file list/cache. The
+           final ID still comes from the synchronized playback list below. */
+        if(!service_file_has_film(app->data_dir, filename)) return 2;
+    }
+    char previous_dir[64];
+    snprintf(previous_dir, sizeof(previous_dir), "%s", service_file_get_dir());
 
     /* ① 数据源切换 + 进入前预检
          目录列表是异步刷新的，"这个 app 有没有内容"只有等列表就绪才问得准，
@@ -653,7 +695,25 @@ static void app_do_switch(app_id_t id)
                  app->data_dir, (unsigned)service_file_set_dir_sync(app->data_dir));
     }
 
-    if(app != NULL && app->enter_block_reason != NULL)
+    if(filename != NULL)
+    {
+        uint8_t status = !service_file_is_list_ready() ? 3 :
+                         (app->prepare_open(filename) ? 0 : 2);
+        if(status != 0)
+        {
+            (void)service_file_set_dir_sync(previous_dir);
+            return status;
+        }
+        /* Same image app: consume the one-shot target without panel reset or
+           changing ownership; an already executing waveform finishes normally. */
+        if(id == m_current_app && m_app_running)
+        {
+            app->on_enter();
+            return 0;
+        }
+    }
+
+    if(filename == NULL && app != NULL && app->enter_block_reason != NULL)
     {
         const char *why = app->enter_block_reason();
 
@@ -667,7 +727,7 @@ static void app_do_switch(app_id_t id)
             }
             sys_logw(APP_MANAGER_TAG, "switch to %s blocked: %s", app->name, why);
             app_menu_notice(why);
-            return;
+            return 2;
         }
     }
 
@@ -716,6 +776,7 @@ static void app_do_switch(app_id_t id)
         m_boot_evt_pending = 0;
         app_manager_notify_boot();
     }
+    return 0;
 }
 
 /**

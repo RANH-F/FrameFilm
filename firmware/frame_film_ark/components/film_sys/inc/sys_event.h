@@ -19,7 +19,7 @@ extern "C" {
  */
 #define SYS_EVENT_MAX_SUBSCRIBERS   (8)     // 订阅槽上限（固定表，免动态内存）
 #define SYS_FILE_LIST_SAVE_PENDING  (1)     // FILE_LIST 第 5 字节：随后 FILE_SAVED 决定是否显示
-#define SYS_EVENT_PAYLOAD_MAX       (16)    // 内联负载上限，值语义 memcpy
+#define SYS_EVENT_PAYLOAD_MAX       (192)    // 内联负载上限，值语义 memcpy
 
 /*********************************************************************
 * TYPEDEFS

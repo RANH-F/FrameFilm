@@ -56,6 +56,7 @@ class _PassportEditorState extends State<PassportEditor> {
   PassportAvatarEdit? _avatarEdit;
   String _status = '';
   PassportRaster? _raster;
+  int _rasterGeneration = -1;
   int _generation = 0, _editRevision = 0;
   Object? _seenRevision;
   Future<void> _saving = Future.value();
@@ -200,12 +201,14 @@ class _PassportEditorState extends State<PassportEditor> {
   Future<void> _refresh() async {
     final generation = ++_generation;
     final profile = _profile;
-    // Do not leave a stale preview visible while a newer raster is pending.
-    if (mounted) setState(() => _raster = null);
+    // Keep the last complete raster visible until its replacement is ready.
     try {
       final raster = await renderPassport(profile);
       if (mounted && generation == _generation) {
-        setState(() => _raster = raster);
+        setState(() {
+          _raster = raster;
+          _rasterGeneration = generation;
+        });
       }
     } catch (e) {
       if (mounted && generation == _generation) {
@@ -252,7 +255,12 @@ class _PassportEditorState extends State<PassportEditor> {
       _changed();
       return;
     }
-    setState(() => _working = true);
+    final previousMode = _avatarMode;
+    setState(() {
+      _working = true;
+      _avatarMode = mode;
+    });
+    _changed();
     try {
       final edit = _avatarEdit ?? PassportAvatarEdit(_avatar!);
       final rendered = await renderAvatarEdit(edit, mode);
@@ -263,7 +271,11 @@ class _PassportEditorState extends State<PassportEditor> {
         _changed();
       }
     } catch (e) {
-      if (mounted) setState(() => _status = '头像处理失败：$e');
+      if (mounted) {
+        _avatarMode = previousMode;
+        _changed();
+        setState(() => _status = '头像处理失败：$e');
+      }
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -445,7 +457,8 @@ class _PassportEditorState extends State<PassportEditor> {
                   widget.canOperate &&
                       !_locked &&
                       errors.isEmpty &&
-                      _raster != null
+                      _raster != null &&
+                      _rasterGeneration == _generation
                   ? () => _run(() {
                       final json = _profile.toJson();
                       final bin = _raster!.bin;

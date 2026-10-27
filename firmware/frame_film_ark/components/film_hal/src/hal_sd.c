@@ -286,3 +286,9 @@ int hal_sd_format(void)
     return 0;
 }
 
+
+int hal_sd_get_space(uint64_t *total, uint64_t *free_bytes)
+{
+    if(!sd_mount_status || !total || !free_bytes) return -1;
+    return esp_vfs_fat_info(MOUNT_POINT, total, free_bytes) == ESP_OK ? 0 : -1;
+}

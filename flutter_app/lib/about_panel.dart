@@ -17,7 +17,8 @@ void _registerProjectLicense() {
 }
 
 class AboutPanel extends StatelessWidget {
-  const AboutPanel({super.key});
+  const AboutPanel({super.key, this.embedded = false});
+  final bool embedded;
   Future<void> _open(BuildContext context, String url) async {
     try {
       await openExternalLink(url);
@@ -30,8 +31,8 @@ class AboutPanel extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => WorkbenchPanel(
-    child: Column(
+  Widget build(BuildContext context) {
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text('关于', style: Theme.of(context).textTheme.titleLarge),
@@ -81,6 +82,7 @@ class AboutPanel extends StatelessWidget {
           ],
         ),
       ],
-    ),
-  );
+    );
+    return embedded ? content : WorkbenchPanel(child: content);
+  }
 }

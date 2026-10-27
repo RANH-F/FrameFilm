@@ -2,6 +2,10 @@
 #define __SERVICE_FILE_H__
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+
 
 /*********************************************************************
  * INCLUDES
@@ -65,6 +69,8 @@ typedef struct {
     uint32_t data_len;
     uint8_t *pdata;
     uint8_t owner;
+    void (*done)(void *context, int result, int64_t write_us);
+    void *context;
 } file_msg_t;
 
 typedef enum {
@@ -98,6 +104,9 @@ typedef enum {
  * 初始化状态变量，检查SD卡状态。
  */
 extern void service_file_init(void);
+
+/** Independent read-only scan: directory 1=film, 2=animation. */
+extern int service_file_catalog(uint8_t directory, uint32_t index, uint32_t *count, char *name, size_t name_size);
 
 /**
  * @brief 设置当前文件目录
@@ -155,6 +164,13 @@ extern void service_file_refresh_list(void);
  * @return int 0:成功, -1:失败
  */
 extern int service_file_save_data(file_save_owner_t owner, uint8_t *pdata, uint32_t data_len);
+/* Borrow pdata until done(context, result, write_us) on file_task. Never frees pdata.
+ * 0: queued, exactly one callback; -1: not queued, no callback.
+ * Callback must not block or call synchronous file-service APIs. */
+extern int service_file_save_data_async(file_save_owner_t owner, uint8_t *pdata,
+                                       uint32_t data_len,
+                                       void (*done)(void *, int, int64_t), void *context);
+
 
 /**
  * @brief 开始保存文件
@@ -231,6 +247,11 @@ extern uint32_t service_file_get_count(void);
  * @return int 0:成功, -1:失败（文件ID无效或列表刷新中）
  */
 extern int service_file_get_filename_safe(uint32_t file_id, char *out, uint32_t out_size);
+
+/* Resolve an exact basename in the current ready playback list under its lock. */
+extern int service_file_find_id(const char *filename, uint32_t *out_id);
+/* Read-only preflight with the same suffix/minimum-size rules as the list. */
+extern bool service_file_has_film(const char *dir, const char *filename);
 
 /**
  * @brief 获取PSRAM缓冲区指针

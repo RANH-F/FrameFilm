@@ -64,6 +64,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private var connected = false
     private var message = "请扫描并连接 Ark"
     private var devices: List<Map<String, String>> = emptyList()
+    private var advertisedName: String? = null
     private var name: String? = null
     private var battery: Int? = null
     private var width: Int? = null
@@ -86,7 +87,10 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     }
     private var fileListing = false
     private val deviceFiles = linkedMapOf<Int, String>()
-    private var fileDirectory = "current"
+    private var fileDirectory = "film"
+    private var catalogSupported: Boolean? = null
+    private var storage: Map<String, Any?> = mapOf("phase" to "idle")
+    private var canDeleteFiles = false
     private var filesLoaded = false
     private var currentFileId: Int? = null
     private var filesMessage = "刷新设备当前目录"
@@ -190,8 +194,10 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         "appUpdate" to appUpdates.snapshot(),
         "files" to mapOf("loaded" to filesLoaded, "directory" to fileDirectory,
             "currentId" to currentFileId, "message" to filesMessage,
+            "storage" to storage, "canDelete" to canDeleteFiles,
             "entries" to deviceFiles.map { mapOf("id" to it.key, "name" to it.value) }),
         "connected" to connected, "message" to message, "devices" to devices,
+        "advertisedName" to if (connected) advertisedName else null,
         "name" to name, "battery" to battery, "width" to width, "height" to height,
         "autoSleep" to autoSleep, "timedWake" to timedWake, "wakeMinutes" to wakeMinutes,
         "syncedAt" to syncedAt, "settingsMessage" to settingsMessage, "settingsBusy" to refreshing,
@@ -223,6 +229,13 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         if (closed) { result.error("closed", "蓝牙会话已关闭", null); return }
         try {
             when (call.method) {
+                "loadInterfaceTheme" -> { result.success(activity.getSharedPreferences("ark-interface", Activity.MODE_PRIVATE).getString("theme", null)); return }
+                "saveInterfaceTheme" -> {
+                    val theme = call.argument<String>("theme")
+                    require(theme in setOf("1", "0")) { "无效主题" }
+                    check(activity.getSharedPreferences("ark-interface", Activity.MODE_PRIVATE).edit().putString("theme", theme).commit()) { "主题保存失败" }
+                    result.success(null); return
+                }
                 "openExternalLink" -> {
                     val uri = Uri.parse(requireNotNull(call.argument<String>("url")) { "缺少链接地址" })
                     require(uri.scheme.equals("https", true) && !uri.host.isNullOrBlank()) { "仅支持 HTTPS 链接" }
@@ -252,7 +265,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "saveGeneratedFilm" -> {
                     check(saveFilmResult == null) { "正在保存文件" }
                     val bytes = requireNotNull(call.argument<ByteArray>("bytes")) { "缺少 film 数据" }
-                    require(bytes.size in 32..(32 * 1024 * 1024)) { "film 文件大小无效" }
+                    require(bytes.size in 32..FilmConverter.MAX_FILM_BYTES) { "film 文件大小无效" }
                     val name = (call.argument<String>("name") ?: "frame.film").substringAfterLast('/').substringAfterLast('\\')
                     saveFilmResult = result; saveFilmBytes = bytes
                     try {
@@ -316,7 +329,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                         throw error
                     }
                 }
-                "listDeviceFiles", "displayDeviceFile", "deleteDeviceFile", "setDeviceFileDirectory", "playAnimation" -> filesCommand(call, result)
+                "refreshDeviceStorage", "listDeviceFiles", "displayDeviceFile", "deleteDeviceFile", "setDeviceFileDirectory", "playAnimation" -> filesCommand(call, result)
                 "readPassport" -> beginPassport(result)
                 "savePassport" -> savePassport(call, result)
                 "retryPassport" -> retryPassport(result)
@@ -403,8 +416,10 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                 "connect" -> {
                     val address = call.argument<String>("address")
                     require(!address.isNullOrBlank()) { "请选择 Ark 设备" }
-                    require(devices.any { it["address"] == address }) { "请先扫描并选择 Ark" }
+                    val selectedName = devices.firstOrNull { it["address"] == address }?.get("name")
+                    require(selectedName != null) { "请先扫描并选择 Ark" }
                     withPermissions(result) {
+                        advertisedName = selectedName
                         clearRead("cancelled", "已切换设备")
                         clearDetails()
                         connected = false
@@ -595,7 +610,8 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     }
 
     private fun clearDetails() {
-        fileListing = false; deviceFiles.clear(); filesLoaded = false; currentFileId = null; fileDirectory = "current"
+        fileListing = false; deviceFiles.clear(); filesLoaded = false; currentFileId = null; fileDirectory = "film"
+        catalogSupported = null; storage = mapOf("phase" to "idle"); canDeleteFiles = false
         name = null; battery = null; width = null; height = null
         autoSleep = null; timedWake = null; wakeMinutes = null; syncedAt = null; settingsMessage = null
     }
@@ -924,7 +940,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
 
     // FILE_LIST has no terminal packet. The subsequent 0x08 reply is the
     // ordered end marker, including for an empty directory.
-    private fun listDeviceFiles(done: (() -> Unit)? = null) {
+    private fun listActiveDeviceFiles(done: (() -> Unit)? = null) {
         deviceFiles.clear(); filesLoaded = false; currentFileId = null
         fileListing = true; filesMessage = "正在读取当前目录"
         writeFilesCommand(0x06, byteArrayOf()) {
@@ -958,7 +974,9 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
         checkPassportAvailable()
         val id = call.argument<Number>("id")?.toInt()
         if (call.method in setOf("displayDeviceFile", "deleteDeviceFile")) {
-            require(id != null && id in 0..255 && filesLoaded && deviceFiles[id] == call.argument<String>("name")) {
+            val imageByName = call.method == "displayDeviceFile" && fileDirectory == "film"
+            require(id != null && id >= 0 && (imageByName || id <= 255) &&
+                filesLoaded && deviceFiles[id] == call.argument<String>("name")) {
                 "文件列表已变化，请刷新后重试"
             }
         }
@@ -1002,76 +1020,182 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
 
             "listDeviceFiles" -> listDeviceFiles()
             "displayDeviceFile" -> displayDeviceFile(id!!, call.argument<String>("name")!!)
-            "setDeviceFileDirectory" -> writeFilesCommand(0x4B, byteArrayOf(appId!!.toByte())) {
-                main.postDelayed({
-                    if (connected && refreshing) request(0x4C) { data ->
-                        require(data.size == 1) { "当前页面响应无效" }
-                        if ((data[0].toInt() and 255) != appId) {
-                            finishSettings("目录未切换：目标 app 可能为空、未注册或设备正忙", true)
-                        } else {
-                            fileDirectory = if (appId == 3) "animation" else "film"
-                            listDeviceFiles()
-                        }
-                    }
-                }, 400)
+            "setDeviceFileDirectory" -> {
+                fileDirectory = if (appId == 3) "animation" else "film"
+                listDeviceFiles()
             }
-            else -> writeFilesCommand(0x05, byteArrayOf(id!!.toByte())) {
-                filesMessage = "删除命令已发送，正在重新读取列表"
-                main.postDelayed({ if (connected && refreshing) listDeviceFiles() }, 400)
-            }
+            "refreshDeviceStorage" -> readStorage { finishSettings(storage["message"] as? String ?: "SD 卡统计已更新") }
+            else -> deleteCatalogFile(call.argument<String>("name")!!)
+
         }
         emit()
     }
 
-    private fun displayDeviceFile(id: Int, expectedName: String) {
-        val targetApp = if (fileDirectory == "film") 0 else 3
-        val setChannel = if (targetApp == 0) 0x45 else 0x49
-        val tag = if (targetApp == 0) 3 else 4
-        // The protocol cannot query the directory itself. A cached label is only
-        // usable while its owning app is still active; a menu may retain either directory.
-        request(0x4C) { page ->
-            require(page.size == 1) { "当前页面响应无效" }
-            if ((page[0].toInt() and 255) != targetApp) {
-                fileDirectory = "current"; filesLoaded = false; deviceFiles.clear(); currentFileId = null
-                finishSettings("设备页面已变化，请先选择图片目录或动画目录，再刷新选择文件", true)
-                return@request
-            }
-            // IDs can change following local device operations. Re-read before
-            // applying a persisted app cursor, rather than trusting the UI snapshot.
-            listDeviceFiles {
-                if (deviceFiles[id] != expectedName) {
-                    finishSettings("文件列表已变化，请从刷新后的列表重新选择", true)
-                    return@listDeviceFiles
-                }
-                val payload = byteArrayOf(tag.toByte(), 4, 0, 0, 0, id.toByte())
-                writeFilesCommand(setChannel, payload) {
-                    request(setChannel + 1) { data ->
-                        var offset = 0
-                        var confirmedId: Long? = null
-                        while (offset + 2 <= data.size) {
-                            val itemTag = data[offset++].toInt() and 255
-                            val length = data[offset++].toInt() and 255
-                            require(offset + length <= data.size) { "文件参数响应无效" }
-                            if (itemTag == tag) {
-                                require(length == 4) { "文件参数长度无效" }
-                                var value = 0L
-                                repeat(length) { value = (value shl 8) or (data[offset + it].toLong() and 255) }
-                                confirmedId = value
+    private fun displayDeviceFile(@Suppress("UNUSED_PARAMETER") id: Int, expectedName: String) {
+        if (fileDirectory == "film") { displayImageByName(expectedName); return }
+        val targetApp = 3
+        writeFilesCommand(0x4B, byteArrayOf(targetApp.toByte())) {
+            main.postDelayed({ if (connected && refreshing) request(0x4C) { page ->
+                require(page.size == 1 && (page[0].toInt() and 255) == targetApp) { "设备未进入目标 app，请等待设备就绪后重试" }
+                listActiveDeviceFiles {
+                    val activeId = deviceFiles.entries.firstOrNull { it.value == expectedName }?.key
+                    if (activeId == null || activeId !in 0..255) { finishSettings("文件列表已变化，请刷新重选", true); return@listActiveDeviceFiles }
+                    val channel = 0x49
+                    val tag = 4
+                    writeFilesCommand(channel, byteArrayOf(tag.toByte(), 4, 0, 0, 0, activeId.toByte())) {
+                        request(channel + 1) { parameters ->
+                            var offset = 0
+                            var confirmed: Long? = null
+                            while (offset + 2 <= parameters.size) {
+                                val itemTag = parameters[offset++].toInt() and 255
+                                val length = parameters[offset++].toInt() and 255
+                                require(offset + length <= parameters.size) { "显示参数响应无效" }
+                                if (itemTag == tag) { require(length == 4); confirmed = u32(parameters, offset) }
+                                offset += length
                             }
-                            offset += length
-                        }
-                        require(offset == data.size && confirmedId == id.toLong()) { "文件参数回读不一致，请刷新后重试" }
-                        request(0x4C) { current ->
-                            require(current.size == 1) { "当前页面响应无效" }
-                            if ((current[0].toInt() and 255) == targetApp) {
-                                listDeviceFiles()
-                            } else {
-                                fileDirectory = "current"; filesLoaded = false; deviceFiles.clear(); currentFileId = null
-                                finishSettings("文件参数已保存，但设备页面已变化，请重新选择目录", true)
-                            }
+                            require(offset == parameters.size && confirmed == activeId.toLong()) { "显示文件参数回读不一致，请刷新重试" }
+                            listDeviceFiles()
                         }
                     }
                 }
+            } }, 400)
+        }
+    }
+
+    private fun displayImageByName(expectedName: String) {
+        val filename = expectedName.toByteArray(Charsets.UTF_8)
+        if (filename.size !in 1..189 || expectedName.any { it == '\u0000' || it == '/' || it == '\\' } ||
+            expectedName == "." || expectedName == "..") {
+            finishSettings("图片文件名无效或超过 189 字节，请重命名后刷新重试", true)
+            return
+        }
+        request(0x59) { capabilities ->
+            require(capabilities.size == 5 && capabilities[0].toInt() == 1) { "设备能力响应无效，请升级 Ark 固件后重试" }
+            if ((u32(capabilities, 1) and 8L) == 0L) {
+                finishSettings("此固件不支持按文件名直接打开图片，请升级 Ark 固件后重试", true)
+                return@request
+            }
+            request(0x4B, byteArrayOf(0) + filename + byteArrayOf(0)) { response ->
+                require(response.size == 2 && response[0] == 0.toByte()) { "打开图片响应无效，请重新连接后重试" }
+                when (response[1].toInt() and 255) {
+                    // Success confirms that the target first frame was submitted, not displayed.
+                    0 -> listDeviceFiles()
+                    1 -> finishSettings("设备不支持此图片打开请求，请升级 Ark 固件并刷新后重试", true)
+                    2 -> finishSettings("图片已不存在，请刷新目录后重新选择", true)
+                    3 -> finishSettings("设备正在开机、休眠或处理目录，请等待设备就绪后重试", true)
+                    else -> finishSettings("设备返回未知的图片打开状态，请刷新后重试", true)
+                }
+            }
+            pending?.takeIf { it.channel == 0x4B }?.let { read ->
+                read.timeout?.let(main::removeCallbacks)
+                // A previous full-screen waveform may still be completing.
+                read.timeout = Runnable {
+                    if (pending === read) failRead("timeout", "打开图片响应超时，请重新连接并刷新后重试")
+                }.also { main.postDelayed(it, 45_000) }
+            }
+        }
+        pending?.takeIf { it.channel == 0x59 }?.let { read ->
+            read.timeout?.let(main::removeCallbacks)
+            read.timeout = Runnable {
+                if (pending === read) failRead("unsupported_firmware", "无法读取图片打开能力，请升级 Ark 固件后重新连接重试")
+            }.also { main.postDelayed(it, 7_000) }
+        }
+    }
+
+    private fun deleteCatalogFile(expectedName: String) {
+        val targetApp = if (fileDirectory == "film") 0 else 3
+        request(0x4C) { page ->
+            require(page.size == 1) { "当前页面响应无效" }
+            if ((page[0].toInt() and 255) != targetApp) {
+                canDeleteFiles = false
+                finishSettings("为避免切换设备画面，请先在设备打开对应 app 后删除", true)
+            } else listActiveDeviceFiles {
+                val activeId = deviceFiles.entries.firstOrNull { it.value == expectedName }?.key
+                if (activeId == null || activeId !in 0..255) { finishSettings("文件列表已变化，请刷新重选", true); return@listActiveDeviceFiles }
+                request(0x4C) { current ->
+                    if (current.size != 1 || (current[0].toInt() and 255) != targetApp) {
+                        canDeleteFiles = false; finishSettings("设备页面已变化，请刷新后重试删除", true)
+                    } else writeFilesCommand(0x05, byteArrayOf(activeId.toByte())) {
+                        main.postDelayed({ if (connected && refreshing) listDeviceFiles() }, 400)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ensureCatalog(done: () -> Unit) {
+        if (catalogSupported == true) { done(); return }
+        if (catalogSupported == false) { unsupportedCatalog(); return }
+        request(0x59) { data ->
+            catalogSupported = data.size == 5 && data[0].toInt() == 1 && (u32(data, 1) and 4L) != 0L
+            if (catalogSupported == true) done() else unsupportedCatalog()
+        }
+        pending?.let { read ->
+            read.timeout?.let(main::removeCallbacks)
+            read.timeout = Runnable { if (pending === read) {
+                pending = null; catalogSupported = false; unsupportedCatalog()
+            } }.also { main.postDelayed(it, 7000) }
+        }
+    }
+
+    private fun unsupportedCatalog() {
+        deviceFiles.clear(); filesLoaded = false; canDeleteFiles = false
+        filesMessage = "此固件不支持只读目录和 SD 统计，请升级 Ark 固件"
+        storage = mapOf("phase" to "unsupported", "message" to filesMessage)
+        finishSettings(filesMessage)
+    }
+
+    private fun readStorage(done: () -> Unit) {
+        storage = mapOf("phase" to "loading"); emit()
+        ensureCatalog {
+            request(0x5B, byteArrayOf(0)) { data ->
+                require(data.size == 26) { "SD 统计响应无效" }
+                val valid = data[1].toInt() and 7
+                fun u64(offset: Int): Long = (u32(data, offset) shl 32) or u32(data, offset + 4)
+                val ok = data[0].toInt() == 0
+                storage = mapOf("phase" to if (!ok) "error" else if (valid == 7) "ready" else "partial",
+                    "totalBytes" to if (ok && (valid and 1) != 0) u64(2) else null,
+                    "freeBytes" to if (ok && (valid and 1) != 0) u64(10) else null,
+                    "filmCount" to if (ok && (valid and 2) != 0) u32(data, 18) else null,
+                    "animationCount" to if (ok && (valid and 4) != 0) u32(data, 22) else null,
+                    "message" to if (!ok) "SD 卡未挂载，尚未读取" else if (valid != 7) "部分统计未读取，可刷新重试" else "来自设备 SD 卡的实际统计")
+                emit(); done()
+            }
+        }
+    }
+
+    private fun listDeviceFiles() {
+        deviceFiles.clear(); filesLoaded = false; currentFileId = null; canDeleteFiles = false
+        filesMessage = "正在只读浏览目录"; emit()
+        readStorage { readCatalogPage(0, null) }
+    }
+
+    private fun readCatalogPage(index: Int, expectedCount: Long?) {
+        val dir = if (fileDirectory == "animation") 2 else 1
+        request(0x5B, byteArrayOf(dir.toByte()) + be32(index)) { data ->
+            require(data.size >= 5) { "目录响应无效" }
+            val status = data[0].toInt() and 255
+            val count = u32(data, 1)
+            if (expectedCount != null && count != expectedCount) {
+                deviceFiles.clear(); filesLoaded = false
+                finishSettings("读取期间目录已变化，请刷新重试", true); return@request
+            }
+            if (status == 4) {
+                require(index.toLong() == count) { "目录结束位置无效" }
+                filesLoaded = true
+                request(0x4C) { page ->
+                    require(page.size == 1) { "当前页面响应无效" }
+                    canDeleteFiles = (page[0].toInt() and 255) == if (dir == 1) 0 else 3
+                    filesMessage = "只读目录已更新；浏览不会切换 app 或刷新设备画面"
+                    finishSettings(filesMessage)
+                }
+            } else if (status == 0) {
+                require(data.size > 6 && data.last() == 0.toByte() && index.toLong() < count) { "目录文件名无效" }
+                deviceFiles[index] = data.copyOfRange(5, data.lastIndex).toString(Charsets.UTF_8)
+                readCatalogPage(index + 1, count)
+            } else {
+                deviceFiles.clear(); filesLoaded = false
+                finishSettings(if (status == 1) "SD 卡未挂载" else if (status == 5) "文件名过长，无法通过 BLE 浏览" else "读取目录失败，请刷新重试", true)
             }
         }
     }
@@ -1079,7 +1203,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private fun remoteCommand(call: MethodCall, result: MethodChannel.Result) {
         checkPassportAvailable()
         val remote = call.method == "remoteKey"
-        if (!remote) { filesLoaded = false; deviceFiles.clear(); currentFileId = null; fileDirectory = "current" }
+        if (!remote) { filesLoaded = false; deviceFiles.clear(); currentFileId = null; canDeleteFiles = false }
         val value = requireNotNull(call.argument<Number>(if (remote) "key" else "appId")).toInt()
         require(value in if (remote) 0..4 else 0..6) { "不支持的按键或页面 ID" }
         refreshing = true; refreshResult = result
@@ -1237,7 +1361,7 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
     private fun importGeneratedFilm(call: MethodCall, result: MethodChannel.Result) {
         checkReplace()
         val bytes = requireNotNull(call.argument<ByteArray>("bytes")) { "缺少 film 数据" }
-        require(bytes.size in 32..(32 * 1024 * 1024)) { "film 文件大小无效" }
+        require(bytes.size in 32..FilmConverter.MAX_FILM_BYTES) { "film 文件大小无效" }
         val requestedName = call.argument<String>("name") ?: "ark_frame.film"
         importing = true; importResult = result; emit()
         worker.execute {
@@ -1482,8 +1606,8 @@ class ArkBridge(private val activity: Activity, messenger: BinaryMessenger) :
                             if (count < 0) break
                             if (Thread.currentThread().isInterrupted) error("导入已取消")
                             total += count
-                            val limit = if (firmware) 4L * 1024 * 1024 else 32L * 1024 * 1024
-                            require(total <= limit) { if (firmware) "固件超过 Ark 4 MiB Flash 容量" else "film 超过 32 MiB" }
+                            val limit = if (firmware) 4L * 1024 * 1024 else FilmConverter.MAX_FILM_BYTES.toLong()
+                            require(total <= limit) { if (firmware) "固件超过 Ark 4 MiB Flash 容量" else "film 超过 128 MiB" }
                             output.write(buffer, 0, count)
                         }
                     }

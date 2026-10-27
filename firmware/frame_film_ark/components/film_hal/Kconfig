@@ -1,0 +1,14 @@
+menu "Ark EPD diagnostics"
+
+    config ARK_EPD_PROFILE
+        bool "Enable per-frame driver timing"
+        default n
+        help
+            Emit one ESP_LOGI EPD_PROFILE JSON record per mono or 8bpp display
+            driver call. Keep the ESP-IDF log level at Info or higher to see it.
+            All timings use microseconds; this is not end-to-end FPS.
+            Stages include preparation passes and original command/wait/delay
+            time. RAM timing includes encoding and SPI transfer. This option
+            does not modify LUTs, SPI frequency, panel timings or recovery.
+
+endmenu

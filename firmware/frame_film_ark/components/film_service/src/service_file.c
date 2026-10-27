@@ -41,11 +41,13 @@
 #include "freertos/semphr.h"
 
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 
 #include "sys_log.h"
 #include "sys_event.h"
 #include "hal_api.h"
 #include "service_file.h"
+#include "esp_timer.h"
 
 /*********************************************************************
  * MACROS
@@ -112,6 +114,8 @@ static TaskHandle_t m_file_task_hdl = NULL;
 static QueueHandle_t m_file_msg_hdl = NULL;
 static TimerHandle_t m_file_timer = NULL;
 static file_service_state_t m_file_state;
+/* file_task is the sole writer. DMA_ATTR keeps this out of RTC FAST heap. */
+static DMA_ATTR uint8_t m_save_dma_buffer[4096];
 static SemaphoreHandle_t m_file_list_mutex = NULL;  // 保护 file_list/file_count 跨任务访问
 static SemaphoreHandle_t m_save_call_mutex = NULL;
 static SemaphoreHandle_t m_save_done = NULL;
@@ -126,6 +130,36 @@ static volatile uint8_t m_list_ready = 0;           // 当前目录列表是否�
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
+/* Keep full-sector writes aligned in both the file and normal DMA DRAM.
+ * Partial sectors still go through FatFS, but never pass the PSRAM source. */
+static size_t file_save_write_dma(FILE *fp, const uint8_t *data, size_t len, uint32_t offset)
+{
+    size_t written = 0;
+    while(written < len)
+    {
+        size_t remaining = len - written;
+        size_t partial = (offset + written) % 512;
+        size_t count;
+        if(partial != 0)
+        {
+            count = 512 - partial;
+            if(count > remaining) count = remaining;
+        }
+        else if(remaining >= 512)
+        {
+            count = remaining > sizeof(m_save_dma_buffer) ? sizeof(m_save_dma_buffer) : remaining;
+            count -= count % 512;
+        }
+        else count = remaining;
+
+        memcpy(m_save_dma_buffer, data + written, count);
+        size_t saved = fwrite(m_save_dma_buffer, 1, count, fp);
+        written += saved;
+        if(saved != count) break;
+    }
+    return written;
+}
+
 static void file_log_header(const char *stage, const uint8_t *hdr, size_t len)
 {
     char hex[FILM_HEADER_SIZE * 2 + 1];
@@ -381,6 +415,12 @@ static void file_task_handle(void *pvParameters)
                 m_file_state.save_file_handle = fopen(m_file_state.save_part_path, "wb");
                 if(m_file_state.save_file_handle)
                 {
+                    if(setvbuf(m_file_state.save_file_handle, NULL, _IONBF, 0) != 0)
+                    {
+                        fclose(m_file_state.save_file_handle);
+                        m_file_state.save_file_handle = NULL;
+                        goto save_start_done;
+                    }
                     m_file_state.save_file_size = msg.file_size;
                     m_file_state.save_written = 0;
                     m_file_state.save_header_len = 0;
@@ -396,7 +436,9 @@ save_start_done:
                 xSemaphoreGive(m_save_done);
                 break;
             case MSG_FILE_SAVE_DATA:
-                m_save_result = -1;
+            {
+                int result = -1;
+                int64_t write_start = esp_timer_get_time();
                 if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle &&
                    !m_file_state.save_failed && msg.pdata &&
                    msg.data_len <= m_file_state.save_file_size - m_file_state.save_written)
@@ -410,21 +452,24 @@ save_start_done:
                         m_file_state.save_header_len += take;
                         file_log_header("prewrite", m_file_state.save_header, m_file_state.save_header_len);
                     }
-                    size_t written = fwrite(msg.pdata, 1, msg.data_len, m_file_state.save_file_handle);
+                    size_t written = file_save_write_dma(m_file_state.save_file_handle, msg.pdata,
+                                                         msg.data_len, m_file_state.save_written);
                     m_file_state.save_written += written;
-                    if(written == msg.data_len) m_save_result = 0;
+                    if(written == msg.data_len) result = 0;
                     else m_file_state.save_failed = 1;
                 }
                 else if(m_file_state.save_owner == msg.owner)
                 {
                     m_file_state.save_failed = 1;
                 }
-                if(msg.pdata)
+                if(msg.pdata && !msg.done)
                 {
                     free(msg.pdata);
                 }
-                xSemaphoreGive(m_save_done);
+                if(msg.done) msg.done(msg.context, result, esp_timer_get_time() - write_start);
+                else { m_save_result = result; xSemaphoreGive(m_save_done); }
                 break;
+            }
             case MSG_FILE_SAVE_STOP:
                 m_save_result = -1;
                 if(m_file_state.save_owner == msg.owner && m_file_state.save_file_handle)
@@ -1297,6 +1342,16 @@ int service_file_save_data(file_save_owner_t owner, uint8_t *pdata, uint32_t dat
     return file_save_call(&msg); // 入队成功后 file_task 接管 pdata，包括失败路径
 }
 
+int service_file_save_data_async(file_save_owner_t owner, uint8_t *pdata,
+                                 uint32_t data_len, void (*done)(void *, int, int64_t), void *context)
+{
+    if((owner != FILE_SAVE_BLE && owner != FILE_SAVE_WIFI) || !pdata || !data_len ||
+       !done || !m_file_msg_hdl) return -1;
+    file_msg_t msg = {.ID = MSG_FILE_SAVE_DATA, .owner = owner, .pdata = pdata,
+                     .data_len = data_len, .done = done, .context = context};
+    return xQueueSend(m_file_msg_hdl, &msg, pdMS_TO_TICKS(100)) == pdPASS ? 0 : -1;
+}
+
 int service_file_save_start(file_save_owner_t owner, const char *pfilename, uint32_t file_size)
 {
     if(!pfilename || !pfilename[0] || strcmp(pfilename, ".") == 0 ||
@@ -1390,6 +1445,39 @@ int service_file_get_filename_safe(uint32_t file_id, char *out, uint32_t out_siz
     return ret;
 }
 
+bool service_file_has_film(const char *dir, const char *filename)
+{
+    if(dir == NULL || filename == NULL) return false;
+    const char *ext = strrchr(filename, '.');
+    if(ext == NULL || strcmp(ext, FILM_FILE_EXT) != 0) return false;
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    struct stat st;
+    return n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0 &&
+           S_ISREG(st.st_mode) && st.st_size >= FILM_HEADER_SIZE;
+}
+
+int service_file_find_id(const char *filename, uint32_t *out_id)
+{
+    if(filename == NULL || out_id == NULL) return -1;
+    int ret = -1;
+    file_list_lock();
+    if(m_list_ready && m_file_state.file_list != NULL)
+    {
+        for(uint32_t i = 0; i < m_file_state.file_count; i++)
+        {
+            if(strcmp(filename, m_file_state.file_list[i].filename) == 0)
+            {
+                *out_id = i;
+                ret = 0;
+                break;
+            }
+        }
+    }
+    file_list_unlock();
+    return ret;
+}
+
 uint8_t* service_file_get_buffer(void)
 {
     return m_file_state.psram_buffer;
@@ -1455,4 +1543,40 @@ int service_file_delete(uint32_t file_id)
         sys_logw(FILE_TAG, "Failed to delete file: %s", filepath);
         return -1;
     }
+}
+
+/* No set_dir/refresh/clean or playback state mutation; missing directory is empty. */
+int service_file_catalog(uint8_t directory, uint32_t index, uint32_t *count,
+                         char *name, size_t name_size)
+{
+    const char *path = directory == 1 ? FILM_DIR : directory == 2 ? ANIM_DIR : NULL;
+    if(!path || !count || (name && name_size == 0)) return 3;
+    *count = 0;
+    if(name) name[0] = '\0';
+    if(hal_sd_get_status() != SD_MOUNT) return 1;
+    DIR *dir = opendir(path);
+    if(!dir) return errno == ENOENT ? 0 : 2;
+    struct dirent *entry;
+    int result = 0;
+    errno = 0;
+    while((entry = readdir(dir)) != NULL)
+    {
+        char *ext = strrchr(entry->d_name, '.');
+        if(!ext || strcmp(ext, FILM_FILE_EXT)) continue;
+        char full[512];
+        struct stat st;
+        if(snprintf(full, sizeof(full), "%s/%s", path, entry->d_name) >= sizeof(full) ||
+           stat(full, &st) != 0) { result = 2; break; }
+        if(!S_ISREG(st.st_mode) || st.st_size < FILM_HEADER_SIZE) continue;
+        if(name && *count == index)
+        {
+            if(strlen(entry->d_name) >= name_size) { result = 5; break; }
+            strcpy(name, entry->d_name);
+        }
+        ++*count;
+        errno = 0;
+    }
+    if(errno != 0) result = 2;
+    closedir(dir);
+    return result;
 }

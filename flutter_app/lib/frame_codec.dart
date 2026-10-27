@@ -60,18 +60,20 @@ void _check(bool Function()? cancelled) {
   if (cancelled?.call() ?? false) throw const FrameCancelledException();
 }
 
-Future<Uint8List> _quantizeMono(
+Future<Uint8List> quantizeFrameMono(
   Uint8List rgba,
   bool dither,
   bool Function()? isCancelled,
-  void Function(double)? onProgress,
-) async {
-  final indices = Uint8List(480 * 720);
-  var current = Float64List(482 * 3);
-  var next = Float64List(482 * 3);
-  for (var y = 0; y < 720; y++) {
-    for (var x = 0; x < 480; x++) {
-      final pixel = y * 480 + x, offset = (x + 1) * 3;
+  void Function(double)? onProgress, {
+  int width = 480,
+  int height = 720,
+}) async {
+  final indices = Uint8List(width * height);
+  var current = Float64List((width + 2) * 3);
+  var next = Float64List((width + 2) * 3);
+  for (var y = 0; y < height; y++) {
+    for (var x = 0; x < width; x++) {
+      final pixel = y * width + x, offset = (x + 1) * 3;
       final channels = <double>[
         for (var c = 0; c < 3; c++)
           (rgba[pixel * 4 + c] + current[offset + c]).clamp(0, 255),
@@ -103,9 +105,9 @@ Future<Uint8List> _quantizeMono(
     next = old;
     next.fillRange(0, next.length, 0);
     _check(isCancelled);
-    onProgress?.call(.05 + .85 * (y + 1) / 720);
+    onProgress?.call(.05 + .85 * (y + 1) / height);
     _check(isCancelled);
-    if ((y + 1) % 8 == 0 || y == 719) {
+    if ((y + 1) % 8 == 0 || y == height - 1) {
       await Future<void>.delayed(Duration.zero);
       _check(isCancelled);
     }
@@ -234,7 +236,7 @@ Future<Uint8List> _png(ui.Image image) async =>
     (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer
         .asUint8List();
 
-void _adjustRgba(Uint8List rgba, FrameOptions options) {
+void adjustFrameRgba(Uint8List rgba, FrameOptions options) {
   if (options.brightness != 0) {
     for (var i = 0; i < rgba.length; i += 4) {
       for (var c = 0; c < 3; c++) {
@@ -279,7 +281,7 @@ Future<Uint8List> prepareFrame(
     final rgba = (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!
         .buffer
         .asUint8List();
-    _adjustRgba(rgba, options);
+    adjustFrameRgba(rgba, options);
     final result = await _encodeRgba(rgba);
     _check(isCancelled);
     onProgress?.call(1);
@@ -304,7 +306,7 @@ Future<FrameResult> convertFrame(
     image.dispose();
   }
   if (!(options.dither && options.algorithm == FrameAlgorithm.szEnhanced)) {
-    _adjustRgba(rgba, options);
+    adjustFrameRgba(rgba, options);
   }
   _check(isCancelled);
   final format = options.format == FrameFormat.monoFast
@@ -326,7 +328,7 @@ Future<FrameResult> convertFrame(
   Uint8List indices;
   if (options.format == FrameFormat.monoFast) {
     // MonoFast is a Flutter extension; retain its existing luminance/FS path.
-    indices = await _quantizeMono(
+    indices = await quantizeFrameMono(
       rgba,
       options.dither,
       isCancelled,
