@@ -197,9 +197,11 @@ class DeviceStorageSummary extends StatelessWidget {
     super.key,
     required this.controller,
     this.onBrowseDirectory,
+    this.embedded = false,
   });
   final DeviceController controller;
   final ValueChanged<int>? onBrowseDirectory;
+  final bool embedded;
 
   static String _bytes(Object? value) {
     if (value is! num) return '未读取';
@@ -218,62 +220,62 @@ class DeviceStorageSummary extends StatelessWidget {
       String count(String key) =>
           storage[key] is num ? '${storage[key]} 个' : '未读取';
       final available = controller.canEditSettings;
-      return Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+      final content = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  const Icon(Icons.sd_storage_outlined),
-                  const SizedBox(width: 8),
-                  const Expanded(child: Text('设备 SD 卡')),
-                  IconButton(
-                    tooltip: '刷新 SD 卡统计',
-                    onPressed: available
-                        ? () => controller.command('refreshDeviceStorage')
-                        : null,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
-              ),
-              Text(
-                '总容量 ${_bytes(storage['totalBytes'])} · 剩余 ${_bytes(storage['freeBytes'])}',
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                children: [
-                  TextButton.icon(
-                    onPressed: available && onBrowseDirectory != null
-                        ? () => onBrowseDirectory!(0)
-                        : null,
-                    icon: const Icon(Icons.image_outlined),
-                    label: Text('图片 ${count('filmCount')} · 查看'),
-                  ),
-                  TextButton.icon(
-                    onPressed: available && onBrowseDirectory != null
-                        ? () => onBrowseDirectory!(3)
-                        : null,
-                    icon: const Icon(Icons.animation),
-                    label: Text('动画 ${count('animationCount')} · 查看'),
-                  ),
-                ],
-              ),
-              if (phase == 'loading') const LinearProgressIndicator(),
-              Text(
-                storage['message'] as String? ??
-                    (controller.snapshot.connected
-                        ? '尚未读取 SD 卡统计'
-                        : '连接设备后读取 SD 卡统计'),
-                style: Theme.of(context).textTheme.bodySmall,
+              const Icon(Icons.sd_storage_outlined),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('设备 SD 卡')),
+              IconButton(
+                tooltip: '刷新 SD 卡统计',
+                onPressed: available
+                    ? () => controller.command('refreshDeviceStorage')
+                    : null,
+                icon: const Icon(Icons.refresh),
               ),
             ],
           ),
-        ),
+          Text(
+            '总容量 ${_bytes(storage['totalBytes'])} · 剩余 ${_bytes(storage['freeBytes'])}',
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              TextButton.icon(
+                onPressed: available && onBrowseDirectory != null
+                    ? () => onBrowseDirectory!(0)
+                    : null,
+                icon: const Icon(Icons.image_outlined),
+                label: Text('图片 ${count('filmCount')} · 查看'),
+              ),
+              TextButton.icon(
+                onPressed: available && onBrowseDirectory != null
+                    ? () => onBrowseDirectory!(3)
+                    : null,
+                icon: const Icon(Icons.animation),
+                label: Text('动画 ${count('animationCount')} · 查看'),
+              ),
+            ],
+          ),
+          if (phase == 'loading') const LinearProgressIndicator(),
+          Text(
+            storage['message'] as String? ??
+                (controller.snapshot.connected
+                    ? '尚未读取 SD 卡统计'
+                    : '连接设备后读取 SD 卡统计'),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
       );
+      return embedded
+          ? content
+          : Card(
+              child: Padding(padding: const EdgeInsets.all(16), child: content),
+            );
     },
   );
 }

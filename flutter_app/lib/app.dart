@@ -671,23 +671,6 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       ),
       const SizedBox(height: 20),
       connectionInfoPanel(context),
-      if (snapshot.connected) ...[
-        const SizedBox(height: 20),
-        DeviceStorageSummary(
-          controller: device,
-          onBrowseDirectory: (directory) {
-            navigate(5);
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted && page == 5 && scrollControllers[5].hasClients) {
-                scrollControllers[5].jumpTo(0);
-              }
-            });
-            unawaited(
-              device.command('setDeviceFileDirectory', {'appId': directory}),
-            );
-          },
-        ),
-      ],
     ];
   }
 
@@ -810,7 +793,11 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
   String shortBuild(String value) =>
       value.length > 16 ? value.substring(0, 16) : value;
 
-  Widget transferStatus(BuildContext context, {required String kind}) {
+  Widget transferStatus(
+    BuildContext context, {
+    required String kind,
+    bool embedded = false,
+  }) {
     final snapshot = device.snapshot;
     final globalTransfer = snapshot.transfer;
     final firmware = kind == 'firmware';
@@ -854,78 +841,76 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
       'error' => '传输未完成',
       _ => transfer.phase,
     };
-    return panel(
-      context,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            phase,
-            key: const Key('transfer-phase'),
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 12),
-          Text(transfer.message),
-          if (globalTransfer.kind != kind &&
-              (globalTransfer.active || globalTransfer.canConfirm))
-            Text(firmware ? '设备正在传输 film，请等待传输结束。' : '设备正在升级固件，请在设置页处理。'),
-          if (firmware && transfer.targetBuild != null)
-            Text('目标构建：${shortBuild(transfer.targetBuild!)}'),
-          if (transfer.active || transfer.total > 0) ...[
-            const SizedBox(height: 16),
-            LinearProgressIndicator(
-              key: const Key('transfer-progress'),
-              value: transfer.progress,
-            ),
-            const SizedBox(height: 8),
-            Text('${transfer.received} / ${transfer.total} 字节'),
-          ],
-          if (transfer.phase == 'done' ||
-              transfer.phase == 'cancelled' ||
-              transfer.phase == 'error') ...[
-            const SizedBox(height: 12),
-            Text(
-              transfer.cleanupCompleted
-                  ? '临时服务与连接清理已确认'
-                  : '清理尚未确认，请查看上方原因；可重试以重新处理连接。',
-            ),
-          ],
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          phase,
+          key: const Key('transfer-phase'),
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
+        Text(transfer.message),
+        if (globalTransfer.kind != kind &&
+            (globalTransfer.active || globalTransfer.canConfirm))
+          Text(firmware ? '设备正在传输 film，请等待传输结束。' : '设备正在升级固件，请在设置页处理。'),
+        if (firmware && transfer.targetBuild != null)
+          Text('目标构建：${shortBuild(transfer.targetBuild!)}'),
+        if (transfer.active || transfer.total > 0) ...[
           const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              OutlinedButton(
-                key: const Key('cancel-transfer'),
-                onPressed: supported && transfer.canCancel
-                    ? () => device.command('cancelTransfer')
-                    : null,
-                child: Text(firmware ? '取消升级' : '取消传输'),
-              ),
-              if (transfer.canConfirm)
-                FilledButton(
-                  key: const Key('confirm-firmware'),
-                  onPressed: supported && !device.busy && !transfer.active
-                      ? () => device.command('confirmFirmwareTransfer')
-                      : null,
-                  child: const Text('重连并确认升级'),
-                ),
-              FilledButton.tonal(
-                key: const Key('retry-transfer'),
-                onPressed:
-                    available &&
-                        hasFile &&
-                        snapshot.connected &&
-                        transfer.canRetry
-                    ? () => device.command('retryTransfer')
-                    : null,
-                child: Text(firmware ? '重试升级' : '重试传输'),
-              ),
-            ],
+          LinearProgressIndicator(
+            key: const Key('transfer-progress'),
+            value: transfer.progress,
+          ),
+          const SizedBox(height: 8),
+          Text('${transfer.received} / ${transfer.total} 字节'),
+        ],
+        if (transfer.phase == 'done' ||
+            transfer.phase == 'cancelled' ||
+            transfer.phase == 'error') ...[
+          const SizedBox(height: 12),
+          Text(
+            transfer.cleanupCompleted
+                ? '临时服务与连接清理已确认'
+                : '清理尚未确认，请查看上方原因；可重试以重新处理连接。',
           ),
         ],
-      ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            OutlinedButton(
+              key: const Key('cancel-transfer'),
+              onPressed: supported && transfer.canCancel
+                  ? () => device.command('cancelTransfer')
+                  : null,
+              child: Text(firmware ? '取消升级' : '取消传输'),
+            ),
+            if (transfer.canConfirm)
+              FilledButton(
+                key: const Key('confirm-firmware'),
+                onPressed: supported && !device.busy && !transfer.active
+                    ? () => device.command('confirmFirmwareTransfer')
+                    : null,
+                child: const Text('重连并确认升级'),
+              ),
+            FilledButton.tonal(
+              key: const Key('retry-transfer'),
+              onPressed:
+                  available &&
+                      hasFile &&
+                      snapshot.connected &&
+                      transfer.canRetry
+                  ? () => device.command('retryTransfer')
+                  : null,
+              child: Text(firmware ? '重试升级' : '重试传输'),
+            ),
+          ],
+        ),
+      ],
     );
+    return embedded ? content : panel(context, child: content);
   }
 
   Widget firmwarePanel(BuildContext context) {
@@ -1073,6 +1058,8 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ),
+          const Divider(height: 32),
+          transferStatus(context, kind: 'firmware', embedded: true),
         ],
       ),
     );
@@ -1401,6 +1388,24 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
               ? device.snapshot.message
               : '当前平台无蓝牙连接能力，仅供界面预览',
         ),
+        if (device.snapshot.connected) ...[
+          const Divider(height: 32),
+          DeviceStorageSummary(
+            controller: device,
+            embedded: true,
+            onBrowseDirectory: (directory) {
+              navigate(5);
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && page == 5 && scrollControllers[5].hasClients) {
+                  scrollControllers[5].jumpTo(0);
+                }
+              });
+              unawaited(
+                device.command('setDeviceFileDirectory', {'appId': directory}),
+              );
+            },
+          ),
+        ],
       ],
     ),
   );
@@ -1414,13 +1419,19 @@ class _FrameFilmAppState extends State<FrameFilmApp> {
     const SizedBox(height: 20),
     firmwarePanel(context),
     const SizedBox(height: 20),
-    transferStatus(context, kind: 'firmware'),
-    const SizedBox(height: 20),
     themePanel(context),
     const SizedBox(height: 20),
-    panel(context, child: AppUpdatePanel(controller: appUpdate)),
-    const SizedBox(height: 20),
-    const AboutPanel(),
+    panel(
+      context,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AppUpdatePanel(controller: appUpdate),
+          const Divider(height: 32),
+          const AboutPanel(embedded: true),
+        ],
+      ),
+    ),
   ];
 
   Widget connectionTransition() => Stack(
