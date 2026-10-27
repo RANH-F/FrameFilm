@@ -35,6 +35,9 @@ class ArkSession(context: Context, private val listener: Listener) {
     private var closed = false
     private var connectedDevice: BluetoothDevice? = null
     private var coordinator: DirectTransferCoordinator? = null
+    private var transferOwnerAddress: String? = null
+    private var lastTransferSnapshot: TransferSnapshot? = null
+    private var readyAfterCleanup = false
     private val ble: ArkBleController = ArkBleController(context, object : ArkBleController.Listener {
         override fun onDevices(found: List<BluetoothDevice>) {
             devices.clear()
@@ -42,15 +45,19 @@ class ArkSession(context: Context, private val listener: Listener) {
             if (!closed) listener.onDevices(found)
         }
         override fun onReady() {
-            if (!closed) listener.onConnection(true, "Ark GATT 已就绪，MTU ${ble.negotiatedMtu}")
-            coordinator?.onBleReady()
-            pump()
+            if (closed) return
+            readyAfterCleanup = true
+            resumeReadyAfterCleanup()
         }
         override fun onPanel(panelId: Int, width: Int, height: Int) { }
         override fun onState(state: String) {
-            if (!closed) listener.onConnection(ble.isReady, state)
+            // ArkBleController emits this before onReady. Defer ordinary refresh
+            // until an interrupted transfer has settled.
+            if (!closed && !(ble.isReady && (readyAfterCleanup || needsTransferRecovery())))
+                listener.onConnection(ble.isReady, state)
         }
         override fun onError(message: String) {
+            readyAfterCleanup = false
             if (!closed) listener.onConnection(false, message)
             if (!ble.isReady) {
                 coordinator?.onBleDisconnected()
@@ -69,9 +76,58 @@ class ArkSession(context: Context, private val listener: Listener) {
 
     private fun publishTransfer(snapshot: TransferSnapshot, input: TransferInput? = lastInput) {
         val image = input?.firmware
-        listener.onTransfer(snapshot.copy(
+        val published = snapshot.copy(
             kind = when { input?.targetPath != null -> "file"; image != null -> "firmware"; else -> "film" },
-            targetVersion = image?.version, targetBuild = image?.elfSha256))
+            targetVersion = image?.version, targetBuild = image?.elfSha256)
+        lastTransferSnapshot = published
+        listener.onTransfer(published)
+    }
+
+    private fun needsTransferRecovery(): Boolean = coordinator?.let {
+        !it.needsConfirmation && (it.isActive || !it.cleanupConfirmed)
+    } == true
+
+    private fun resumeReadyAfterCleanup() {
+        if (!readyAfterCleanup || closed || !ble.isReady || settling) return
+        val previous = coordinator
+        if (previous != null && !previous.needsConfirmation && previous.isActive) return
+        if (previous != null && !previous.needsConfirmation && !previous.cleanupConfirmed) {
+            settling = true
+            val last = lastTransferSnapshot
+            last?.let {
+                publishTransfer(it.copy(phase = "cleanup", message = "已重连，正在确认上一轮传输已结束",
+                    canCancel = false, canRetry = false, cleanupCompleted = false))
+            }
+            previous.ensureSettled { complete, message ->
+                settling = false
+                if (closed || coordinator !== previous) return@ensureSettled
+                last?.let {
+                    publishTransfer(it.copy(
+                        phase = if (complete) it.phase else "error",
+                        message = if (complete)
+                            "${it.message.substringBefore("; Ark 恢复终态未确认").substringBefore("; 手机直连组清理未确认")}；重连后已确认上一轮清理"
+                        else "${it.message}；$message",
+                        cleanupCompleted = complete, success = it.success && complete))
+                }
+                cancelAfterSettle = false
+                if (closing) {
+                    readyAfterCleanup = false
+                    finishClose()
+                } else if (disconnectAfterTransfer) {
+                    readyAfterCleanup = false
+                    disconnectAfterTransfer = false
+                    ble.close()
+                } else finishReadyAfterCleanup()
+            }
+        } else finishReadyAfterCleanup()
+    }
+
+    private fun finishReadyAfterCleanup() {
+        if (!readyAfterCleanup || !ble.isReady || closed) return
+        readyAfterCleanup = false
+        listener.onConnection(true, "Ark GATT 已就绪，MTU ${ble.negotiatedMtu}")
+        coordinator?.onBleReady()
+        pump()
     }
 
     private fun onMain(block: () -> Unit) {
@@ -87,6 +143,10 @@ class ArkSession(context: Context, private val listener: Listener) {
     fun connect(address: String) = onMain {
         if (closed || closing || transferActive || coordinator?.needsConfirmation == true) {
             listener.onConnection(isReady, "直传、关闭或升级结果待确认期间不能切换设备")
+            return@onMain
+        }
+        if (coordinator?.cleanupConfirmed == false && address != transferOwnerAddress) {
+            listener.onConnection(isReady, "请先连接上一台 Ark，确认直传已恢复终态")
             return@onMain
         }
         val device = devices[address]
@@ -168,6 +228,7 @@ class ArkSession(context: Context, private val listener: Listener) {
                             if (!closed) publishTransfer(snapshot)
                             if (snapshot.phase in setOf("done", "cancelled", "error", "unconfirmed") &&
                                 coordinator?.isActive == false) {
+                                resumeReadyAfterCleanup()
                                 if (closing) finishClose()
                                 else if (disconnectAfterTransfer) {
                                     disconnectAfterTransfer = false
@@ -218,6 +279,7 @@ class ArkSession(context: Context, private val listener: Listener) {
             return@onMain
         }
         lastInput = input
+        transferOwnerAddress = connectedDevice?.address
         if (!ble.isReady) {
             publishTransfer(TransferSnapshot("error", "请先连接 Ark", total = file.length(),
                 canRetry = true, cleanupCompleted = coordinator?.cleanupConfirmed ?: true))
