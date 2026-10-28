@@ -10,6 +10,7 @@ set(srcs "src/hal_init.c"
          "src/hal_epd_368.c"
          "src/hal_epd_370.c"
          "src/hal_epd_398.c"
+         "src/hal_epd_398e4.c"
          "src/hal_epd_709.c"
          )
 
